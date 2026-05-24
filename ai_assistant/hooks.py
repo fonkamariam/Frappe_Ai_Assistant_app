@@ -5,6 +5,10 @@ app_description = "Ai chat bot"
 app_email = "fbesrat11@gmail.com"
 app_license = "mit"
 
+page_js = {
+    "ai-chat": "ai_assistant/page/ai_chat/ai_chat.js"
+}
+
 # Apps
 # ------------------
 
