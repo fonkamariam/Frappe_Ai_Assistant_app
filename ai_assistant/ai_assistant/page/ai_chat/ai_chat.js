@@ -13,7 +13,7 @@ frappe.pages['ai-chat'].on_page_load = async function(wrapper) {
     let conversations = [];
     const MAX_TITLE_LENGTH = 30;
 
-    // Dummy data with at least one message so they appear in sidebar
+    // Dummy data
     function getDummyConversations() {
         return [
             { id: '1', title: 'Welcome & introduction', messages: [
@@ -54,15 +54,16 @@ frappe.pages['ai-chat'].on_page_load = async function(wrapper) {
     }
 
     function autoResize(textarea) {
-        // Reset height to calculate scrollHeight correctly
         textarea.style.height = 'auto';
-        // Set to scrollHeight, but not less than 38px (single line)
         textarea.style.height = Math.max(textarea.scrollHeight, 38) + 'px';
     }
 
-    // Close any open dropdowns
     function closeDropdowns() {
         $('.dropdown-menu.show').removeClass('show');
+    }
+
+    function truncateTitle(title) {
+        return title.length > MAX_TITLE_LENGTH ? title.substring(0, MAX_TITLE_LENGTH) + '...' : title;
     }
 
     // ========== CONVERSATION RENDERING ==========
@@ -85,7 +86,6 @@ frappe.pages['ai-chat'].on_page_load = async function(wrapper) {
         const container = $('#conversation-list');
         container.empty();
 
-        // Only show conversations that have at least one message
         let visibleConversations = conversations.filter(c => c.messages.length > 0);
         if (filter) {
             visibleConversations = visibleConversations.filter(c => 
@@ -100,8 +100,8 @@ frappe.pages['ai-chat'].on_page_load = async function(wrapper) {
             groups[label].forEach(conv => {
                 const item = $(`
                     <div class="conversation-item${conv.id === currentConversationId ? ' active' : ''}" data-id="${conv.id}">
-                        <span class="title">${conv.title}</span>
-                        <button class="more-btn">⋮</button>
+                        <span class="title">${truncateTitle(conv.title)}</span>
+                        <button class="more-btn">⋯</button>
                         <div class="dropdown-menu">
                             <div class="dropdown-item rename-action">Rename</div>
                             <div class="dropdown-item danger delete-action">Delete</div>
@@ -109,26 +109,26 @@ frappe.pages['ai-chat'].on_page_load = async function(wrapper) {
                     </div>
                 `);
 
-                // Click on the whole item (except actions) loads conversation
+                // Load conversation on click (except actions)
                 item.on('click', function(e) {
-                    if (!$(e.target).closest('.more-btn, .dropdown-menu').length) {
+                    if (!$(e.target).closest('.more-btn, .dropdown-menu, .title input').length) {
                         closeDropdowns();
                         loadConversation(conv.id);
                     }
                 });
 
-                // Three-dot button click: toggle dropdown
+                // Three-dot button toggle
                 item.find('.more-btn').on('click', function(e) {
                     e.stopPropagation();
-                    closeDropdowns();  // close any other open dropdowns
+                    closeDropdowns();
                     item.find('.dropdown-menu').toggleClass('show');
                 });
 
-                // Rename action
+                // Rename action – inline editing
                 item.find('.rename-action').on('click', function(e) {
                     e.stopPropagation();
                     closeDropdowns();
-                    renameConversation(conv.id);
+                    startInlineRename(item, conv);
                 });
 
                 // Delete action
@@ -140,6 +140,38 @@ frappe.pages['ai-chat'].on_page_load = async function(wrapper) {
 
                 container.append(item);
             });
+        });
+    }
+
+    // Inline rename
+    function startInlineRename(item, conv) {
+        const titleSpan = item.find('.title');
+        const currentTitle = conv.title;
+        const input = $(`<input type="text" value="${currentTitle}" />`);
+        titleSpan.html(input);
+        input.focus();
+        input.select();
+
+        const save = () => {
+            const newTitle = input.val().trim();
+            if (newTitle && newTitle !== currentTitle) {
+                conv.title = newTitle;
+                renderConversationList();
+                showToast('Conversation renamed', 'green');
+            } else {
+                // revert if empty or unchanged
+                titleSpan.text(truncateTitle(currentTitle));
+            }
+        };
+
+        input.on('blur', save);
+        input.on('keydown', function(e) {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                input.trigger('blur');
+            } else if (e.key === 'Escape') {
+                titleSpan.text(truncateTitle(currentTitle));
+            }
         });
     }
 
@@ -157,6 +189,16 @@ frappe.pages['ai-chat'].on_page_load = async function(wrapper) {
 
     function clearChat() {
         $('#chat-messages').empty();
+        // Remove "Start Chatting" if present
+        $('.start-chatting').remove();
+    }
+
+    // Show "Start Chatting" centered
+    function showStartChatting() {
+        const main = $('.ai-chat-main');
+        if (!$('.start-chatting').length) {
+            main.prepend('<div class="start-chatting">Start Chatting</div>');
+        }
     }
 
     // ========== CONVERSATION ACTIONS ==========
@@ -168,9 +210,14 @@ frappe.pages['ai-chat'].on_page_load = async function(wrapper) {
         conv.messages.forEach(m => addMessage(m.role, m.content));
         $('#empty-state').hide();
         $('#chat-messages, #input-container').show();
+        // Hide "Start Chatting" if messages exist
+        if (conv.messages.length > 0) {
+            $('.start-chatting').remove();
+        } else {
+            showStartChatting();
+        }
         renderConversationList();
         scrollToBottom();
-        // Reset textarea height
         const textarea = $('#user-message')[0];
         textarea.style.height = 'auto';
         textarea.style.height = Math.max(textarea.scrollHeight, 38) + 'px';
@@ -180,7 +227,7 @@ frappe.pages['ai-chat'].on_page_load = async function(wrapper) {
         const newId = 'conv_' + Date.now();
         conversations.unshift({
             id: newId,
-            title: 'New Chat',   // temporary, will be updated on first message
+            title: 'New Chat',
             messages: [],
             timestamp: new Date()
         });
@@ -188,28 +235,27 @@ frappe.pages['ai-chat'].on_page_load = async function(wrapper) {
         clearChat();
         $('#empty-state').hide();
         $('#chat-messages, #input-container').show();
-        // Do NOT render the sidebar list because the conversation has no messages yet
+        showStartChatting();
         closeDropdowns();
-        // Reset input
         $('#user-message').val('');
         const textarea = $('#user-message')[0];
         textarea.style.height = 'auto';
         textarea.style.height = Math.max(textarea.scrollHeight, 38) + 'px';
+        // No sidebar re-render because conversation has no messages
     }
 
     function deleteConversation(id) {
         frappe.confirm('Are you sure you want to delete this conversation?', () => {
             conversations = conversations.filter(c => c.id !== id);
             if (currentConversationId === id) {
-                // Switch to the most recent conversation that has messages, if any
                 const remaining = conversations.filter(c => c.messages.length > 0);
                 currentConversationId = remaining.length ? remaining[0].id : null;
                 if (currentConversationId) {
                     loadConversation(currentConversationId);
                 } else {
-                    // No conversations left with messages -> show empty state
                     $('#empty-state').show();
                     $('#chat-messages, #input-container').hide();
+                    $('.start-chatting').remove();
                 }
             }
             renderConversationList();
@@ -217,15 +263,9 @@ frappe.pages['ai-chat'].on_page_load = async function(wrapper) {
         });
     }
 
+    // Rename called from dropdown – no longer inline edit triggered here; inline edit is started directly from dropdown
     function renameConversation(id) {
-        const conv = conversations.find(c => c.id === id);
-        if (!conv) return;
-        const newTitle = prompt('Rename conversation:', conv.title);
-        if (newTitle && newTitle.trim()) {
-            conv.title = newTitle.trim().substring(0, MAX_TITLE_LENGTH);
-            renderConversationList();
-            showToast('Conversation renamed', 'green');
-        }
+        // This function is kept for potential use but dropdown now calls startInlineRename directly
     }
 
     // ========== MESSAGE SENDING ==========
@@ -234,34 +274,29 @@ frappe.pages['ai-chat'].on_page_load = async function(wrapper) {
         const message = textarea.val().trim();
         if (!message) return;
 
-        // If no active conversation, create one first
         if (!currentConversationId || !conversations.find(c => c.id === currentConversationId)) {
             newConversation();
         }
         const conv = conversations.find(c => c.id === currentConversationId);
         if (!conv) return;
 
-        // Add user message
         conv.messages.push({ role: 'user', content: message });
         addMessage('user', message);
         textarea.val('');
         autoResize(textarea[0]);
 
-        // If this is the first message, update title and now show in sidebar
-        if (conv.messages.filter(m => m.role === 'user').length === 1 && conv.messages.filter(m => m.role === 'assistant').length === 0) {
-            // Still has no assistant response, so title based on user message only
+        // Update title and show in sidebar after first message
+        if (conv.messages.filter(m => m.role === 'user').length === 1) {
             conv.title = message.length > MAX_TITLE_LENGTH ? message.substring(0, MAX_TITLE_LENGTH) + '...' : message;
-            // Now that the conversation has a message, re-render sidebar
             renderConversationList();
-        } else if (conv.messages.filter(m => m.role === 'user').length === 1) {
-            // First user message already set title, maybe it was a new chat with existing welcome? Not used.
         }
 
-        // Show thinking and disable send
+        // Remove "Start Chatting" now that messages exist
+        $('.start-chatting').remove();
+
         disableSend(true);
         addMessage('assistant', '', true);
 
-        // Simulate API delay
         setTimeout(() => {
             $('.thinking').remove();
             const response = dummyResponses[Math.floor(Math.random() * dummyResponses.length)];
@@ -292,7 +327,6 @@ frappe.pages['ai-chat'].on_page_load = async function(wrapper) {
         showToast('File upload will be added in Phase 6', 'orange');
     });
 
-    // Close dropdowns when clicking outside
     $(document).on('click', function(e) {
         if (!$(e.target).closest('.dropdown-menu, .more-btn').length) {
             closeDropdowns();
@@ -302,20 +336,17 @@ frappe.pages['ai-chat'].on_page_load = async function(wrapper) {
     // ========== INIT ==========
     conversations = getDummyConversations();
     if (conversations.length > 0) {
-        // Load the first conversation with messages
         const firstWithMessages = conversations.find(c => c.messages.length > 0);
         if (firstWithMessages) {
             currentConversationId = firstWithMessages.id;
             loadConversation(currentConversationId);
         } else {
-            // Should not happen with dummy data, but fallback
             newConversation();
         }
     } else {
         newConversation();
     }
     renderConversationList();
-    // Ensure textarea starts at single line
     const textarea = $('#user-message')[0];
     if (textarea) {
         textarea.style.height = 'auto';
