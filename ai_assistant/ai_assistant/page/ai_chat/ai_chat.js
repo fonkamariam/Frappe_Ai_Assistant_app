@@ -1,382 +1,680 @@
-frappe.pages['ai-chat'].on_page_load = async function(wrapper) {
-    let page = frappe.ui.make_app_page({
+/**
+ * ai_chat.js
+ * ==========
+ * Architecture:
+ *
+ *   ConversationStorage  — localStorage CRUD, schema, sort. Swap for DocType later.
+ *   ChatApiService       — All HTTP, streaming simulation, error handling, retries.
+ *   ChatUI               — DOM rendering only. No API calls. No storage calls.
+ *   Page controller      — Wires the three layers together. Handles events.
+ *
+ * Storage schema per conversation:
+ *   {
+ *     id:           string,
+ *     title:        string,
+ *     created_at:   ISO string,
+ *     last_updated: ISO string,
+ *     messages:     Array<{ role, content, reasoning_content?, attachments? }>
+ *   }
+ */
+
+frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
+
+    const page = frappe.ui.make_app_page({
         parent: wrapper,
         title: 'AI Assistant',
         single_column: true
     });
 
-    $(page.body).html(frappe.render_template("ai_chat", {}));
-    frappe.require("/assets/ai_assistant/css/ai_chat.css");
+    $(page.body).html(frappe.render_template('ai_chat', {}));
+    frappe.require('/assets/ai_assistant/css/ai_chat.css');
 
-    // ========== STATE ==========
-    let currentConversationId = null;
-    let pendingAttachments = [];
-    let conversations = [];
-    let isDarkMode = true;
-    const MAX_TITLE_LENGTH = 30;
+    // =========================================================================
+    // LAYER 1: ConversationStorage
+    // Responsible for: localStorage CRUD, schema normalisation, ordering.
+    // To migrate to Frappe DocTypes later: replace only this class.
+    // =========================================================================
+    const ConversationStorage = (() => {
+        const STORAGE_KEY = 'ai_chat_conversations_v2';
+        const MAX_TITLE   = 30;
 
-    // ========== DUMMY DATA ==========
-    function getDummyConversations() {
-        return [
-            {
-                id: '1',
-                title: 'How to build a REST API with Node.js',
-                messages: [
-                    { role: 'user', content: 'How do I build a REST API with Node.js?' },
-                    { role: 'assistant', content: 'Building a REST API with Node.js is straightforward. Here\'s a quick example using **Express**:\n\n```javascript\nconst express = require(\'express\');\nconst app = express();\n\napp.use(express.json());\n\napp.get(\'/api/users\', (req, res) => {\n  res.json({ users: [] });\n});\n\napp.listen(3000, () => console.log(\'Server running on port 3000\'));\n```\n\nThis sets up a basic GET endpoint. You can extend it with POST, PUT, and DELETE routes as needed.' }
-                ],
-                timestamp: new Date()
-            },
-            {
-                id: '2',
-                title: 'Explain quantum computing in simple terms',
-                messages: [
-                    { role: 'user', content: 'Explain quantum computing in simple terms' },
-                    { role: 'assistant', content: 'Quantum computing uses **qubits** instead of classical bits. While a classical bit is either 0 or 1, a qubit can be both simultaneously — this is called *superposition*. This allows quantum computers to solve certain problems exponentially faster than classical computers.' }
-                ],
-                timestamp: new Date()
-            },
-            {
-                id: '3',
-                title: 'Best practices for React performance',
-                messages: [
-                    { role: 'user', content: 'What are best practices for React performance?' },
-                    { role: 'assistant', content: 'Here are the key React performance practices:\n\n1. Use `React.memo` to prevent unnecessary re-renders\n2. Leverage `useMemo` and `useCallback` for expensive computations\n3. Code-split with `React.lazy` and `Suspense`\n4. Avoid inline object/function creation in JSX\n5. Use virtualization for long lists (`react-window`)' }
-                ],
-                timestamp: new Date(Date.now() - 86400000)
-            },
-            {
-                id: '4',
-                title: 'Design patterns in JavaScript',
-                messages: [
-                    { role: 'user', content: 'What are common design patterns in JavaScript?' },
-                    { role: 'assistant', content: 'Common JavaScript design patterns include the **Module**, **Observer**, **Factory**, and **Singleton** patterns. Each solves different architectural problems.' }
-                ],
-                timestamp: new Date(Date.now() - 86400000)
-            },
-            {
-                id: '5',
-                title: 'Docker container orchestration guide',
-                messages: [
-                    { role: 'user', content: 'Guide me on Docker container orchestration' },
-                    { role: 'assistant', content: 'Docker container orchestration with **Kubernetes** or **Docker Swarm** allows you to manage clusters of containers at scale, handling scaling, networking, and self-healing automatically.' }
-                ],
-                timestamp: new Date(Date.now() - 3 * 86400000)
-            },
-            {
-                id: '6',
-                title: 'Machine learning model deployment',
-                messages: [
-                    { role: 'user', content: 'How do I deploy a machine learning model?' },
-                    { role: 'assistant', content: 'There are several approaches to ML model deployment: **Flask/FastAPI** for a REST endpoint, **TensorFlow Serving**, **AWS SageMaker**, or containerized via Docker. The right choice depends on your scale and infrastructure.' }
-                ],
-                timestamp: new Date(Date.now() - 3 * 86400000)
+        function _load() {
+            try {
+                const raw = localStorage.getItem(STORAGE_KEY);
+                if (!raw) return [];
+                const parsed = JSON.parse(raw);
+                return Array.isArray(parsed) ? parsed : [];
+            } catch {
+                return [];
             }
-        ];
-    }
-
-    const dummyResponses = [
-        "That's an interesting question! Let me think about it.\n\nBased on what you've shared, there are a few approaches worth considering. The key is to start with the simplest solution and iterate from there.",
-        "Great point! Here's a quick example in **JavaScript**:\n\n```javascript\n// Coming soon!\nconst response = await aiAssistant.chat(message);\nconsole.log(response);\n```\n\nOnce connected, you'll see real AI responses here.",
-        "I appreciate your question! This is a demo UI — API integration is coming soon. The response showcases how messages render with **markdown**, `inline code`, and proper formatting.",
-        "Sure! Here are a few things to keep in mind:\n\n1. Start simple and iterate\n2. Test thoroughly at each step\n3. Document your approach\n4. Consider edge cases early",
-        "I'm still learning! In a real scenario, I would fetch the latest information and provide a comprehensive answer tailored to your needs."
-    ];
-
-    // ========== LIGHTWEIGHT MARKDOWN PARSER ==========
-    function renderMarkdown(text) {
-        if (!text) return '';
-
-        // Escape HTML first (for safety)
-        function escapeHtml(str) {
-            return str
-                .replace(/&/g, '&amp;')
-                .replace(/</g, '&lt;')
-                .replace(/>/g, '&gt;');
         }
 
-        // Store code blocks separately to avoid double-processing
-        const codeBlocks = [];
-        let result = text;
+        function _save(convs) {
+            try {
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(convs));
+            } catch (e) {
+                // localStorage quota exceeded — non-fatal
+                console.warn('AI Chat: localStorage save failed', e);
+            }
+        }
 
-        // Fenced code blocks ```lang\ncode```
-        result = result.replace(/```(\w*)\n?([\s\S]*?)```/g, function(match, lang, code) {
-            const escaped = escapeHtml(code.trimEnd());
-            const langLabel = lang || 'code';
-            const placeholder = `__CODEBLOCK_${codeBlocks.length}__`;
-            codeBlocks.push(
-                `<div class="code-block-wrap">` +
-                `<div class="code-block-header">` +
-                `<span class="code-lang">${escapeHtml(langLabel)}</span>` +
-                `<button class="copy-code-btn" data-code="${escaped.replace(/"/g, '&quot;')}">` +
-                `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>` +
-                ` Copy</button>` +
-                `</div>` +
-                `<pre>${escaped}</pre>` +
-                `</div>`
+        /** Always return conversations sorted by last_updated DESC */
+        function getAll() {
+            const convs = _load();
+            return convs.sort((a, b) =>
+                new Date(b.last_updated) - new Date(a.last_updated)
             );
-            return placeholder;
-        });
-
-        // Inline code `code`
-        result = result.replace(/`([^`]+)`/g, function(match, code) {
-            return `<code>${escapeHtml(code)}</code>`;
-        });
-
-        // Bold **text**
-        result = result.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-        // Italic *text* or _text_
-        result = result.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<em>$1</em>');
-        result = result.replace(/_(.+?)_/g, '<em>$1</em>');
-
-        // Process line by line for lists and paragraphs
-        const lines = result.split('\n');
-        const output = [];
-        let inOl = false;
-        let inUl = false;
-
-        for (let i = 0; i < lines.length; i++) {
-            const line = lines[i];
-
-            // Ordered list
-            const olMatch = line.match(/^(\d+)\.\s+(.+)/);
-            if (olMatch) {
-                if (!inOl) { output.push('<ol>'); inOl = true; }
-                output.push(`<li>${olMatch[2]}</li>`);
-                continue;
-            } else if (inOl) {
-                output.push('</ol>');
-                inOl = false;
-            }
-
-            // Unordered list
-            const ulMatch = line.match(/^[-*]\s+(.+)/);
-            if (ulMatch) {
-                if (!inUl) { output.push('<ul>'); inUl = true; }
-                output.push(`<li>${ulMatch[1]}</li>`);
-                continue;
-            } else if (inUl) {
-                output.push('</ul>');
-                inUl = false;
-            }
-
-            // Code block placeholder
-            if (line.includes('__CODEBLOCK_')) {
-                output.push(line);
-                continue;
-            }
-
-            // Empty line
-            if (line.trim() === '') {
-                output.push('');
-                continue;
-            }
-
-            // Normal paragraph line
-            output.push(`<p>${line}</p>`);
         }
 
-        if (inOl) output.push('</ol>');
-        if (inUl) output.push('</ul>');
-
-        result = output.join('');
-
-        // Restore code blocks
-        codeBlocks.forEach((block, i) => {
-            result = result.replace(new RegExp(`<p>__CODEBLOCK_${i}__</p>|__CODEBLOCK_${i}__`), block);
-        });
-
-        return result;
-    }
-
-    // ========== UI HELPERS ==========
-    function showToast(message, type = 'info') {
-        frappe.show_alert({ message, indicator: type }, 3);
-    }
-
-    function disableSend(disabled) {
-        $('#send-btn').prop('disabled', disabled);
-        $('#user-message').prop('disabled', disabled);
-    }
-
-    function scrollToBottom() {
-        const chatBox = document.getElementById('chat-messages');
-        if (chatBox) chatBox.scrollTop = chatBox.scrollHeight;
-    }
-
-    function autoResize(textarea) {
-        textarea.style.height = 'auto';
-        textarea.style.height = Math.min(Math.max(textarea.scrollHeight, 44), 180) + 'px';
-    }
-
-    function closeDropdowns() {
-        $('.dropdown-menu.show').removeClass('show');
-    }
-
-    function truncateTitle(title) {
-        return title.length > MAX_TITLE_LENGTH
-            ? title.substring(0, MAX_TITLE_LENGTH) + '...'
-            : title;
-    }
-
-    function updateChatHeader(title) {
-        if (title) {
-            $('#chat-title').text(title);
+        function getById(id) {
+            return _load().find(c => c.id === id) || null;
         }
-    }
 
-    // ========== THEME ==========
-    function applyTheme() {
-        const wrapper = $('#ai-chat-wrapper');
-        const label = $('#theme-label');
-        const icon = $('#theme-icon');
-        if (isDarkMode) {
-            wrapper.removeClass('light-mode');
-            label.text('Light Mode');
-            // Sun icon (already the default SVG in HTML)
-        } else {
-            wrapper.addClass('light-mode');
-            label.text('Dark Mode');
+        function create(overrides = {}) {
+            const now = new Date().toISOString();
+            const conv = {
+                id:           'conv_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
+                title:        'New Chat',
+                created_at:   now,
+                last_updated: now,
+                messages:     [],
+                ...overrides
+            };
+            const convs = _load();
+            convs.unshift(conv);
+            _save(convs);
+            return conv;
         }
-    }
 
-    $('#theme-toggle-btn').on('click', function () {
-        isDarkMode = !isDarkMode;
-        applyTheme();
-    });
+        function save(conv) {
+            const convs = _load();
+            const idx = convs.findIndex(c => c.id === conv.id);
+            if (idx >= 0) {
+                convs[idx] = conv;
+            } else {
+                convs.unshift(conv);
+            }
+            _save(convs);
+        }
 
-    // ========== SIDEBAR COLLAPSE ==========
-    $('#collapse-sidebar-btn').on('click', function () {
-        $('#sidebar').addClass('collapsed');
-        $('#expand-sidebar-btn').show();
-    });
-    $('#expand-sidebar-btn').on('click', function () {
-        $('#sidebar').removeClass('collapsed');
-        $('#expand-sidebar-btn').hide();
-    });
+        function deleteById(id) {
+            const convs = _load().filter(c => c.id !== id);
+            _save(convs);
+        }
 
-    // New chat via compose button (top of sidebar)
-    $('#compose-btn').on('click', function () {
-        closeDropdowns();
-        newConversation();
-    });
+        function rename(id, newTitle) {
+            const convs = _load();
+            const conv = convs.find(c => c.id === id);
+            if (conv) {
+                conv.title = newTitle.trim().substring(0, 80) || conv.title;
+                _save(convs);
+                return conv;
+            }
+            return null;
+        }
 
-    // ========== CONVERSATION RENDERING ==========
-    function groupByDate(convs) {
-        const today = moment().startOf('day');
-        const yesterday = moment().subtract(1, 'days').startOf('day');
-        const weekAgo = moment().subtract(7, 'days').startOf('day');
-        const monthAgo = moment().subtract(30, 'days').startOf('day');
-        const groups = {
-            'Today': [],
-            'Yesterday': [],
-            'Previous 7 Days': [],
-            'Previous 30 Days': [],
-            'Older': []
+        /**
+         * Touch last_updated on a conversation so it floats to the top.
+         * Call this whenever a user or assistant message is added.
+         */
+        function touch(id) {
+            const convs = _load();
+            const conv = convs.find(c => c.id === id);
+            if (conv) {
+                conv.last_updated = new Date().toISOString();
+                _save(convs);
+            }
+        }
+
+        function addMessage(convId, message) {
+            const convs = _load();
+            const conv = convs.find(c => c.id === convId);
+            if (!conv) return null;
+            if (!Array.isArray(conv.messages)) conv.messages = [];
+            conv.messages.push(message);
+            conv.last_updated = new Date().toISOString();
+            _save(convs);
+            return conv;
+        }
+
+        function autoTitle(text, maxLen = MAX_TITLE) {
+            const clean = text.trim().replace(/\s+/g, ' ');
+            return clean.length > maxLen ? clean.substring(0, maxLen) + '…' : clean;
+        }
+
+        return { getAll, getById, create, save, deleteById, rename, touch, addMessage, autoTitle };
+    })();
+
+
+    // =========================================================================
+    // LAYER 2: ChatApiService
+    // Responsible for: HTTP calls, streaming simulation, error normalisation,
+    //                  retry logic, abort control.
+    // =========================================================================
+    const ChatApiService = (() => {
+        // Active AbortController for the current request
+        let _abortController = null;
+
+        const ERROR_MESSAGES = {
+            MISSING_API_KEY:   'The AI service is not configured. Please contact your administrator.',
+            INVALID_API_KEY:   'The AI API key is invalid. Please contact your administrator.',
+            RATE_LIMITED:      'The AI service is rate-limited. Please wait a moment and try again.',
+            REQUEST_TIMEOUT:   'The request timed out. The AI may be busy — please try again.',
+            NETWORK_ERROR:     'Network error. Please check your connection and try again.',
+            EMPTY_RESPONSE:    'The AI returned an empty response. Please rephrase and try again.',
+            MALFORMED_RESPONSE:'Received an unexpected response from the AI service.',
+            UPSTREAM_ERROR:    'The AI service is experiencing issues. Please try again shortly.',
+            VALIDATION_ERROR:  'Invalid request. Please check your message and try again.',
+            UNKNOWN:           'An unexpected error occurred. Please try again.'
         };
-        convs.forEach(c => {
-            const m = moment(c.timestamp);
-            if (m.isSameOrAfter(today)) groups['Today'].push(c);
-            else if (m.isSameOrAfter(yesterday)) groups['Yesterday'].push(c);
-            else if (m.isSameOrAfter(weekAgo)) groups['Previous 7 Days'].push(c);
-            else if (m.isSameOrAfter(monthAgo)) groups['Previous 30 Days'].push(c);
-            else groups['Older'].push(c);
-        });
-        return groups;
-    }
 
-    function renderConversationList(filter = '') {
-        const container = $('#conversation-list');
-        container.empty();
+        /**
+         * Send a message to the backend and return a structured result.
+         *
+         * @param {string}   message  - latest user text
+         * @param {Array}    history  - prior messages [{role, content}, ...]
+         * @returns {Promise<{ content, reasoning_content, model, usage }>}
+         * @throws  {Error} with a user-friendly .message
+         */
+        async function sendMessage(message, history = []) {
+            // Abort any in-progress request
+            cancel();
+            _abortController = new AbortController();
 
-        let visible = conversations.filter(c => c.messages.length > 0);
-        if (filter) {
-            visible = visible.filter(c =>
-                c.title.toLowerCase().includes(filter.toLowerCase())
-            );
+            // Build history stripped to role+content only (no UI-only fields)
+            const cleanHistory = history.map(m => ({
+                role:    m.role,
+                content: m.content || ''
+            }));
+
+            let response;
+            try {
+                response = await fetch(
+                    '/api/method/ai_assistant.ai_chat_api.send_message',
+                    {
+                        method:  'POST',
+                        headers: {
+                            'Content-Type':       'application/json',
+                            'X-Frappe-CSRF-Token': frappe.csrf_token,
+                        },
+                        body:    JSON.stringify({
+                            message,
+                            history: JSON.stringify(cleanHistory)
+                        }),
+                        signal:  _abortController.signal,
+                    }
+                );
+            } catch (err) {
+                if (err.name === 'AbortError') {
+                    throw Object.assign(new Error('Request cancelled.'), { code: 'CANCELLED' });
+                }
+                throw Object.assign(
+                    new Error(ERROR_MESSAGES.NETWORK_ERROR),
+                    { code: 'NETWORK_ERROR' }
+                );
+            } finally {
+                _abortController = null;
+            }
+
+            let data;
+            try {
+                data = await response.json();
+            } catch {
+                throw Object.assign(
+                    new Error(ERROR_MESSAGES.MALFORMED_RESPONSE),
+                    { code: 'MALFORMED_RESPONSE' }
+                );
+            }
+
+            // Frappe wraps responses in { message: ... }
+            const payload = data.message || data;
+
+            if (!payload.ok) {
+                const code = payload.error || 'UNKNOWN';
+                const userMsg = payload.message
+                    || ERROR_MESSAGES[code]
+                    || ERROR_MESSAGES.UNKNOWN;
+                throw Object.assign(new Error(userMsg), { code });
+            }
+
+            return {
+                content:           payload.content           || '',
+                reasoning_content: payload.reasoning_content || '',
+                model:             payload.model             || '',
+                usage:             payload.usage             || {},
+            };
         }
 
-        const groups = groupByDate(visible);
-        Object.keys(groups).forEach(label => {
-            if (groups[label].length === 0) return;
-            const groupEl = $(`<div class="date-group"><div class="date-label">${label}</div></div>`);
-            groups[label].forEach(conv => {
-                const item = $(`
-                    <div class="conversation-item${conv.id === currentConversationId ? ' active' : ''}" data-id="${conv.id}">
-                        <span class="title">${truncateTitle(conv.title)}</span>
-                        <button class="more-btn" title="More options">⋯</button>
-                        <div class="dropdown-menu">
-                            <div class="dropdown-item rename-action">Rename</div>
-                            <div class="dropdown-item danger delete-action">Delete</div>
+        /**
+         * Cancel the current in-flight request.
+         */
+        function cancel() {
+            if (_abortController) {
+                _abortController.abort();
+                _abortController = null;
+            }
+        }
+
+        function isActive() {
+            return _abortController !== null;
+        }
+
+        /**
+         * Simulate streaming: call onChunk(char) for each character
+         * with a small random delay, then resolve.
+         * This gives the DeepSeek typewriter feel on top of a batch response.
+         *
+         * @param {string}   text       - full text to stream
+         * @param {Function} onChunk    - called with each incremental string
+         * @param {Function} isCancelled- checked before each chunk; if true, stops
+         * @param {number}   speed      - base ms per chunk (adaptive)
+         */
+        async function simulateStream(text, onChunk, isCancelled, speed = 8) {
+            if (!text) return;
+
+            // Adaptive chunk size: larger for long texts to keep it snappy
+            const chunkSize = text.length > 1000 ? 4 : text.length > 400 ? 2 : 1;
+
+            for (let i = 0; i < text.length; i += chunkSize) {
+                if (isCancelled()) return;
+                onChunk(text.slice(i, i + chunkSize));
+                // Very short delay — feels like real streaming
+                if (i % 12 === 0) {
+                    await new Promise(r => setTimeout(r, speed + Math.random() * 6));
+                }
+            }
+        }
+
+        /**
+         * Upload a file to Frappe and return { file_name, file_url }.
+         */
+        async function uploadFile(file) {
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('is_private', 1);
+
+            const response = await fetch('/api/method/upload_file', {
+                method:  'POST',
+                headers: { 'X-Frappe-CSRF-Token': frappe.csrf_token },
+                body:    formData,
+            });
+
+            if (!response.ok) {
+                throw new Error(`Upload failed (HTTP ${response.status})`);
+            }
+
+            const data = await response.json();
+            const msg  = data.message;
+            if (!msg || !msg.file_url) throw new Error('Upload response missing file_url');
+            return { file_name: msg.file_name || file.name, file_url: msg.file_url };
+        }
+
+        return { sendMessage, cancel, isActive, simulateStream, uploadFile };
+    })();
+
+
+    // =========================================================================
+    // LAYER 3: ChatUI
+    // Responsible for: DOM rendering only.
+    // No direct API calls. No localStorage calls.
+    // Calls back to the controller via passed-in functions.
+    // =========================================================================
+    const ChatUI = (() => {
+        const MAX_TITLE_DISPLAY = 30;
+
+        // ------ Markdown renderer ------
+        function renderMarkdown(text) {
+            if (!text) return '';
+
+            function escHtml(str) {
+                return str
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;');
+            }
+
+            const codeBlocks = [];
+
+            // 1. Extract fenced code blocks and replace with HTML immediately
+            let result = text.replace(/```(\w*)\s*\n?([\s\S]*?)```/g, (_, lang, code) => {
+                const escaped   = escHtml(code.trimEnd());
+                const langLabel = lang || 'code';
+                const html = `
+                    <div class="code-block-wrap">
+                        <div class="code-block-header">
+                            <span class="code-lang">${escHtml(langLabel)}</span>
+                            <button class="copy-code-btn" data-code="${escaped.replace(/"/g, '&quot;')}">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                                </svg> Copy
+                            </button>
+                        </div>
+                        <pre>${escaped}</pre>
+                    </div>`;
+                return html;
+            });
+
+            // 2. Inline code
+            result = result.replace(/`([^`]+)`/g, (_, c) => `<code>${escHtml(c)}</code>`);
+
+            // 3. Bold / italic
+            result = result.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+            result = result.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<em>$1</em>');
+            result = result.replace(/_(.+?)_/g, '<em>$1</em>');
+
+            // 4. Lists and paragraphs
+            const lines  = result.split('\n');
+            const output = [];
+            let inOl = false, inUl = false;
+
+            for (const line of lines) {
+                const olMatch = line.match(/^(\d+)\.\s+(.+)/);
+                if (olMatch) {
+                    if (!inOl) { output.push('<ol>'); inOl = true; }
+                    output.push(`<li>${olMatch[2]}</li>`);
+                    continue;
+                } else if (inOl) { output.push('</ol>'); inOl = false; }
+
+                const ulMatch = line.match(/^[-*]\s+(.+)/);
+                if (ulMatch) {
+                    if (!inUl) { output.push('<ul>'); inUl = true; }
+                    output.push(`<li>${ulMatch[1]}</li>`);
+                    continue;
+                } else if (inUl) { output.push('</ul>'); inUl = false; }
+
+                if (line.trim() === '') { output.push(''); continue; }
+
+                // Do NOT wrap a line that is already an HTML block (code block)
+                // Since code blocks are already inserted as raw HTML, they won't be caught here.
+                output.push(`<p>${line}</p>`);
+            }
+
+            if (inOl) output.push('</ol>');
+            if (inUl) output.push('</ul>');
+
+            result = output.join('');
+
+            // 5. Clean up empty <p> tags (optional)
+            result = result.replace(/<p>\s*<\/p>/g, '');
+
+            return result;
+}
+    
+        // ------ Sidebar ------
+        function renderConversationList(conversations, currentId, callbacks) {
+            const container = $('#conversation-list');
+            const filter    = ($('#search-input').val() || '').toLowerCase();
+            container.empty();
+
+            let visible = conversations.filter(c => c.messages && c.messages.length > 0);
+            if (filter) {
+                visible = visible.filter(c => c.title.toLowerCase().includes(filter));
+            }
+
+            if (visible.length === 0) {
+                container.append('<div class="conv-empty-msg">No conversations found.</div>');
+                return;
+            }
+
+            const today     = moment().startOf('day');
+            const yesterday = moment().subtract(1, 'days').startOf('day');
+            const weekAgo   = moment().subtract(7, 'days').startOf('day');
+            const monthAgo  = moment().subtract(30, 'days').startOf('day');
+
+            const groups = {
+                'Today':           [],
+                'Yesterday':       [],
+                'Previous 7 Days': [],
+                'Previous 30 Days':[],
+                'Older':           []
+            };
+
+            visible.forEach(c => {
+                const m = moment(c.last_updated || c.created_at);
+                if      (m.isSameOrAfter(today))     groups['Today'].push(c);
+                else if (m.isSameOrAfter(yesterday))  groups['Yesterday'].push(c);
+                else if (m.isSameOrAfter(weekAgo))    groups['Previous 7 Days'].push(c);
+                else if (m.isSameOrAfter(monthAgo))   groups['Previous 30 Days'].push(c);
+                else                                  groups['Older'].push(c);
+            });
+
+            Object.entries(groups).forEach(([label, items]) => {
+                if (!items.length) return;
+                const groupEl = $(`<div class="date-group"><div class="date-label">${label}</div></div>`);
+                items.forEach(conv => {
+                    const displayTitle = conv.title.length > MAX_TITLE_DISPLAY
+                        ? conv.title.substring(0, MAX_TITLE_DISPLAY) + '…'
+                        : conv.title;
+
+                    const item = $(`
+                        <div class="conversation-item${conv.id === currentId ? ' active' : ''}"
+                             data-id="${conv.id}">
+                            <span class="title">${displayTitle}</span>
+                            <button class="more-btn" title="More options">⋯</button>
+                            <div class="dropdown-menu">
+                                <div class="dropdown-item rename-action">Rename</div>
+                                <div class="dropdown-item danger delete-action">Delete</div>
+                            </div>
+                        </div>`);
+
+                    item.on('click', e => {
+                        if ($(e.target).closest('.more-btn, .dropdown-menu, .title input').length) return;
+                        closeDropdowns();
+                        callbacks.onSelect(conv.id);
+                    });
+                    item.find('.more-btn').on('click', e => {
+                        e.stopPropagation();
+                        closeDropdowns();
+                        item.find('.dropdown-menu').toggleClass('show');
+                    });
+                    item.find('.rename-action').on('click', e => {
+                        e.stopPropagation();
+                        closeDropdowns();
+                        _startInlineRename(item, conv, callbacks.onRename);
+                    });
+                    item.find('.delete-action').on('click', e => {
+                        e.stopPropagation();
+                        closeDropdowns();
+                        callbacks.onDelete(conv.id);
+                    });
+
+                    groupEl.append(item);
+                });
+                container.append(groupEl);
+            });
+        }
+
+        function _startInlineRename(item, conv, onRename) {
+            const titleSpan    = item.find('.title');
+            const currentTitle = conv.title;
+            const input        = $(`<input type="text" value="${currentTitle}" />`);
+            titleSpan.html(input);
+            input.focus().select();
+
+            const save = () => {
+                const newTitle = input.val().trim();
+                if (newTitle && newTitle !== currentTitle) {
+                    onRename(conv.id, newTitle);
+                } else {
+                    const disp = currentTitle.length > 30
+                        ? currentTitle.substring(0, 30) + '…'
+                        : currentTitle;
+                    titleSpan.text(disp);
+                }
+            };
+
+            input.on('blur', save);
+            input.on('keydown', e => {
+                if (e.key === 'Enter')  { e.preventDefault(); input.trigger('blur'); }
+                if (e.key === 'Escape') { titleSpan.text(currentTitle); }
+            });
+        }
+
+        function closeDropdowns() {
+            $('.dropdown-menu.show').removeClass('show');
+        }
+
+        function updateChatHeader(title) {
+            $('#chat-title').text(title || 'AI Assistant');
+        }
+
+        // ------ Message rendering ------
+
+        /**
+         * Append a completed message bubble to the chat.
+         */
+        function appendMessage(role, content, opts = {}) {
+            const { attachments = [], reasoning_content = '', messageId = null } = opts;
+            const chatBox    = $('#chat-messages');
+            const isUser     = role === 'user';
+            const authorLabel= isUser ? 'You' : 'AI Assistant';
+            const avatarHtml = isUser
+                ? `<div class="msg-avatar avatar-user">U</div>`
+                : `<div class="msg-avatar avatar-bot">✦</div>`;
+
+            let bubbleContent = '';
+
+            // Reasoning block (DeepSeek R1)
+            if (!isUser && reasoning_content) {
+                bubbleContent += _buildReasoningBlock(reasoning_content);
+            }
+
+            // Attachments
+            if (attachments.length > 0) {
+                bubbleContent += _buildAttachmentsHtml(attachments);
+            }
+
+            // Main text
+            if (content) {
+                bubbleContent += renderMarkdown(content);
+            }
+
+            const idAttr = messageId ? `id="${messageId}"` : '';
+            const msgHtml = `
+                <div class="message ${role}" ${idAttr}>
+                    ${avatarHtml}
+                    <div class="msg-body">
+                        <span class="msg-author">${authorLabel}</span>
+                        <div class="bubble">${bubbleContent}</div>
+                    </div>
+                </div>`;
+
+            chatBox.append(msgHtml);
+            _bindBubbleEvents(chatBox);
+            scrollToBottom();
+        }
+
+        /**
+         * Create a streaming placeholder message and return control handles.
+         * The caller feeds content into it incrementally.
+         */
+        function createStreamingMessage() {
+            const msgId     = 'stream_msg_' + Date.now();
+            const chatBox   = $('#chat-messages');
+
+            chatBox.append(`
+                <div class="message assistant" id="${msgId}">
+                    <div class="msg-avatar avatar-bot">✦</div>
+                    <div class="msg-body">
+                        <span class="msg-author">AI Assistant</span>
+                        <div class="bubble">
+                            <div class="reasoning-block reasoning-thinking" id="${msgId}_reasoning" style="display:none">
+                                <button class="reasoning-toggle" type="button">
+                                    <span class="reasoning-toggle-icon">▶</span>
+                                    <span class="reasoning-label">Thinking…</span>
+                                </button>
+                                <div class="reasoning-content" id="${msgId}_reasoning_content"></div>
+                            </div>
+                            <div class="stream-content" id="${msgId}_content"></div>
+                            <span class="stream-cursor" id="${msgId}_cursor">▋</span>
                         </div>
                     </div>
-                `);
+                </div>`);
 
-                item.on('click', function (e) {
-                    if ($(e.target).closest('.more-btn, .dropdown-menu, .title input').length) return;
-                    closeDropdowns();
-                    if (conv.id === currentConversationId) return;
-                    loadConversation(conv.id);
-                });
+            scrollToBottom();
 
-                item.find('.more-btn').on('click', function (e) {
-                    e.stopPropagation();
-                    closeDropdowns();
-                    item.find('.dropdown-menu').toggleClass('show');
-                });
-
-                item.find('.rename-action').on('click', function (e) {
-                    e.stopPropagation();
-                    closeDropdowns();
-                    startInlineRename(item, conv);
-                });
-
-                item.find('.delete-action').on('click', function (e) {
-                    e.stopPropagation();
-                    closeDropdowns();
-                    deleteConversation(conv.id);
-                });
-
-                groupEl.append(item);
+            // Bind reasoning toggle for this message
+            $(`#${msgId} .reasoning-toggle`).on('click', function () {
+                const block = $(`#${msgId}_reasoning`);
+                block.toggleClass('open');
+                $(this).find('.reasoning-toggle-icon').text(
+                    block.hasClass('open') ? '▼' : '▶'
+                );
             });
-            container.append(groupEl);
-        });
-    }
 
-    function startInlineRename(item, conv) {
-        const titleSpan = item.find('.title');
-        const currentTitle = conv.title;
-        const input = $(`<input type="text" value="${currentTitle}" />`);
-        titleSpan.html(input);
-        input.focus().select();
+            return {
+                /**
+                 * Append reasoning text incrementally.
+                 * Shows the reasoning block on first call.
+                 */
+                appendReasoning(text) {
+                    const block = $(`#${msgId}_reasoning`);
+                    if (!block.is(':visible')) {
+                        block.show();
+                    }
+                    const el = $(`#${msgId}_reasoning_content`);
+                    el.text(el.text() + text);
+                    scrollToBottom();
+                },
 
-        const save = () => {
-            const newTitle = input.val().trim();
-            if (newTitle && newTitle !== currentTitle) {
-                conv.title = newTitle;
-                renderConversationList();
-                showToast('Conversation renamed', 'green');
-                if (conv.id === currentConversationId) {
-                    updateChatHeader(conv.title);
-                }
-            } else {
-                titleSpan.text(truncateTitle(currentTitle));
-            }
-        };
+                /**
+                 * Mark reasoning as complete — update label.
+                 */
+                finishReasoning() {
+                    $(`#${msgId}_reasoning`)
+                        .removeClass('reasoning-thinking')
+                        .addClass('reasoning-done');
+                    $(`#${msgId}_reasoning .reasoning-label`).text('Thought process');
+                },
 
-        input.on('blur', save);
-        input.on('keydown', function (e) {
-            if (e.key === 'Enter') { e.preventDefault(); input.trigger('blur'); }
-            else if (e.key === 'Escape') { titleSpan.text(truncateTitle(currentTitle)); }
-        });
-    }
+                /**
+                 * Append main content text incrementally.
+                 */
+                appendContent(text) {
+                    const el = $(`#${msgId}_content`);
+                    // Append as raw text, we'll re-render as markdown at the end
+                    el.data('raw', (el.data('raw') || '') + text);
+                    el.text((el.text() || '') + text);
+                    scrollToBottom();
+                },
 
-    // ========== MESSAGE RENDERING ==========
-    function addMessage(role, content, isThinking = false, attachments = []) {
-        const chatBox = $('#chat-messages');
+                /**
+                 * Finalise the message: render markdown, remove cursor, bind events.
+                 */
+                finalise(fullContent, fullReasoning) {
+                    $(`#${msgId}_cursor`).remove();
+                    const contentEl = $(`#${msgId}_content`);
+                    contentEl.html(renderMarkdown(fullContent));
+                    _bindBubbleEvents($('#chat-messages'));
+                },
 
-        if (isThinking) {
-            const thinkingHtml = `
+                /**
+                 * Replace entire message with an error state.
+                 */
+                showError(errorMessage) {
+                    $(`#${msgId}_cursor`).remove();
+                    $(`#${msgId}_reasoning`).hide();
+                    $(`#${msgId}_content`).html(
+                        `<div class="msg-error">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <circle cx="12" cy="12" r="10"/>
+                                <line x1="12" y1="8" x2="12" y2="12"/>
+                                <line x1="12" y1="16" x2="12.01" y2="16"/>
+                            </svg>
+                            ${errorMessage}
+                            <button class="retry-btn" id="${msgId}_retry">Try again</button>
+                        </div>`
+                    );
+                },
+
+                id: msgId
+            };
+        }
+
+        function showThinking() {
+            const chatBox = $('#chat-messages');
+            chatBox.append(`
                 <div class="message assistant thinking-row" id="thinking-indicator">
                     <div class="msg-avatar avatar-bot">✦</div>
                     <div class="msg-body">
@@ -384,394 +682,601 @@ frappe.pages['ai-chat'].on_page_load = async function(wrapper) {
                             <span></span><span></span><span></span>
                         </div>
                     </div>
-                </div>`;
-            chatBox.append(thinkingHtml);
+                </div>`);
             scrollToBottom();
-            return;
         }
 
-        const isUser = role === 'user';
-        const authorLabel = isUser ? 'You' : 'AI Assistant';
-        const avatarHtml = isUser
-            ? `<div class="msg-avatar avatar-user">U</div>`
-            : `<div class="msg-avatar avatar-bot">✦</div>`;
+        function removeThinking() {
+            $('#thinking-indicator').remove();
+        }
 
-        // Build bubble content
-        let bubbleContent = '';
+        function showEmptyState()  {
+            $('#empty-state').show();
+            $('#chat-messages, #input-container').hide();
+        }
 
-        // Attachments
-        if (attachments && attachments.length > 0) {
-            const attHtml = attachments.map(a => {
+        function showChatState() {
+            $('#empty-state').hide();
+            $('#chat-messages, #input-container').show();
+        }
+
+        function clearMessages() {
+            $('#chat-messages').empty();
+            $('.start-chatting').remove();
+        }
+
+        function showStartChatting() {
+            if (!$('.start-chatting').length) {
+                $('.ai-chat-main').append('<div class="start-chatting">Start chatting…</div>');
+            }
+        }
+
+        function setSendState(sending) {
+            $('#send-btn').prop('disabled', sending);
+            $('#user-message').prop('disabled', sending);
+            if (sending) {
+                $('#stop-btn').show();
+                $('#send-btn').hide();
+            } else {
+                $('#stop-btn').hide();
+                $('#send-btn').show();
+            }
+        }
+
+        function scrollToBottom() {
+            const el = document.getElementById('chat-messages');
+            if (el) el.scrollTop = el.scrollHeight;
+        }
+
+        function autoResize(textarea) {
+            textarea.style.height = 'auto';
+            textarea.style.height = Math.min(Math.max(textarea.scrollHeight, 44), 180) + 'px';
+        }
+
+        function applyTheme(isDark) {
+            $('#ai-chat-wrapper').toggleClass('light-mode', !isDark);
+            $('#theme-label').text(isDark ? 'Light Mode' : 'Dark Mode');
+        }
+
+        // ------ Attachment preview in input area ------
+        function renderAttachmentPreviews(pendingAttachments) {
+            const container = $('#attachment-previews');
+            container.empty();
+            pendingAttachments.forEach(att => {
+                const isImage = att.type.startsWith('image/');
+                const sizeStr = _formatSize(att.size);
+                const item    = $(`
+                    <div class="attachment-preview-item" data-id="${att.id}">
+                        ${isImage
+                            ? `<img class="thumb uploading" src="${URL.createObjectURL(att.file)}" alt="${att.name}">`
+                            : `<span class="file-icon">📄</span>`}
+                        <div class="file-info">
+                            <span class="file-name" title="${att.name}">${_truncateFileName(att.name)}</span>
+                            <span class="file-size">${sizeStr}</span>
+                        </div>
+                        <span class="remove-file" data-id="${att.id}">✕</span>
+                    </div>`);
+                container.append(item);
+            });
+        }
+
+        // ------ Private helpers ------
+        function _buildReasoningBlock(reasoning) {
+            return `
+                <div class="reasoning-block reasoning-done">
+                    <button class="reasoning-toggle" type="button">
+                        <span class="reasoning-toggle-icon">▶</span>
+                        <span class="reasoning-label">Thought process</span>
+                    </button>
+                    <div class="reasoning-content">${escapeHtml(reasoning)}</div>
+                </div>`;
+        }
+
+        function escapeHtml(str) {
+            return (str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        }
+
+        function _buildAttachmentsHtml(attachments) {
+            const items = attachments.map(a => {
                 const isImage = /\.(jpg|jpeg|png|gif|webp)$/i.test(a.file_url);
                 if (isImage) {
                     return `<div class="chat-attachment-preview" data-url="${a.file_url}" data-name="${a.file_name}">
                         <img src="${a.file_url}" alt="${a.file_name}">
                     </div>`;
-                } else {
-                    const ext = a.file_name.split('.').pop().toUpperCase();
-                    return `<div class="file-card">
-                        <span class="file-card-icon">📄</span>
-                        <div class="file-card-info">
-                            <span class="file-card-name">${a.file_name}</span>
-                            <span class="file-card-size">${ext} file</span>
-                        </div>
-                    </div>`;
                 }
+                const ext = (a.file_name || '').split('.').pop().toUpperCase();
+                return `<div class="file-card">
+                    <span class="file-card-icon">📄</span>
+                    <div class="file-card-info">
+                        <span class="file-card-name">${a.file_name}</span>
+                        <span class="file-card-size">${ext} file</span>
+                    </div>
+                </div>`;
             }).join('');
-            bubbleContent += `<div class="attachments-grid">${attHtml}</div>`;
+            return `<div class="attachments-grid">${items}</div>`;
         }
 
-        // Text content with markdown
-        if (content) {
-            bubbleContent += renderMarkdown(content);
-        }
-
-        const msgHtml = `
-            <div class="message ${role}">
-                ${avatarHtml}
-                <div class="msg-body">
-                    <span class="msg-author">${authorLabel}</span>
-                    <div class="bubble">${bubbleContent}</div>
-                </div>
-            </div>`;
-
-        chatBox.append(msgHtml);
-
-        // Bind copy buttons for code blocks
-        chatBox.find('.copy-code-btn').last().off('click').on('click', function () {
-            const code = $(this).attr('data-code')
-                .replace(/&amp;/g, '&')
-                .replace(/&lt;/g, '<')
-                .replace(/&gt;/g, '>')
-                .replace(/&quot;/g, '"');
-            navigator.clipboard.writeText(code).then(() => {
-                const btn = $(this);
-                btn.html('<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Copied!');
-                setTimeout(() => {
-                    btn.html('<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy');
-                }, 2000);
-            }).catch(() => {
-                showToast('Copy failed — please copy manually', 'red');
+        function _bindBubbleEvents(chatBox) {
+            // Copy code buttons
+            chatBox.find('.copy-code-btn').off('click.ai').on('click.ai', function () {
+                const code = $(this).attr('data-code')
+                    .replace(/&amp;/g,'&').replace(/&lt;/g,'<')
+                    .replace(/&gt;/g,'>').replace(/&quot;/g,'"');
+                navigator.clipboard.writeText(code).then(() => {
+                    const btn = $(this);
+                    btn.html(`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Copied!`);
+                    setTimeout(() => btn.html(
+                        `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy`
+                    ), 2000);
+                }).catch(() => frappe.show_alert({ message: 'Copy failed', indicator: 'red' }, 2));
             });
-        });
 
-        // Bind lightbox for image attachments
-        chatBox.find('.chat-attachment-preview[data-url]').off('click').on('click', function () {
-            openLightbox($(this).data('url'), $(this).data('name'));
-        });
+            // Reasoning toggles
+            chatBox.find('.reasoning-toggle').off('click.ai').on('click.ai', function () {
+                const block = $(this).closest('.reasoning-block');
+                block.toggleClass('open');
+                $(this).find('.reasoning-toggle-icon').text(block.hasClass('open') ? '▼' : '▶');
+            });
 
-        scrollToBottom();
-    }
-
-    function clearChat() {
-        $('#chat-messages').empty();
-        $('.start-chatting').remove();
-    }
-
-    function showStartChatting() {
-        const main = $('.ai-chat-main');
-        if (!$('.start-chatting').length) {
-            main.append('<div class="start-chatting">Start chatting…</div>');
+            // Image lightbox
+            chatBox.find('.chat-attachment-preview[data-url]').off('click.ai').on('click.ai', function () {
+                _openLightbox($(this).data('url'), $(this).data('name'));
+            });
         }
+
+        function _openLightbox(url, name) {
+            $('#lightbox-image').attr('src', url).attr('alt', name);
+            $('#lightbox-modal').addClass('show');
+        }
+
+        function _formatSize(bytes) {
+            if (bytes < 1024)    return bytes + ' B';
+            if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / 1048576).toFixed(1) + ' MB';
+        }
+
+        function _truncateFileName(name, max = 20) {
+            if (name.length <= max) return name;
+            const ext = name.lastIndexOf('.');
+            if (ext === -1) return name.substring(0, max - 3) + '…';
+            const extension = name.substring(ext);
+            return name.substring(0, max - extension.length - 3) + '…' + extension;
+        }
+
+        return {
+            renderConversationList,
+            updateChatHeader,
+            appendMessage,
+            createStreamingMessage,
+            showThinking,
+            removeThinking,
+            showEmptyState,
+            showChatState,
+            clearMessages,
+            showStartChatting,
+            setSendState,
+            scrollToBottom,
+            autoResize,
+            applyTheme,
+            renderAttachmentPreviews,
+            closeDropdowns,
+            renderMarkdown,
+        };
+    })();
+
+
+    // =========================================================================
+    // PAGE CONTROLLER
+    // Wires ConversationStorage + ChatApiService + ChatUI together.
+    // Handles all events. Manages page-level state.
+    // =========================================================================
+
+    // ---- Page state ----
+    let currentConversationId = null;
+    let pendingAttachments    = [];
+    let isDarkMode            = true;
+    let isStreaming           = false;  // true while a request is in flight
+    let cancelStreaming        = false; // signal to stop simulation loop
+    const MAX_TITLE_LENGTH    = 30;
+
+    // ---- Sidebar callbacks passed to ChatUI ----
+    const sidebarCallbacks = {
+        onSelect: loadConversation,
+        onDelete: deleteConversation,
+        onRename: (id, newTitle) => {
+            const conv = ConversationStorage.rename(id, newTitle);
+            if (conv) {
+                refreshSidebar();
+                if (id === currentConversationId) ChatUI.updateChatHeader(conv.title);
+                frappe.show_alert({ message: 'Conversation renamed', indicator: 'green' }, 2);
+            }
+        }
+    };
+
+    function refreshSidebar() {
+        const convs = ConversationStorage.getAll();
+        ChatUI.renderConversationList(convs, currentConversationId, sidebarCallbacks);
     }
 
-    // ========== CONVERSATION ACTIONS ==========
+    // ---- Conversation management ----
     function loadConversation(id) {
-        pendingAttachments = [];
-        renderAttachmentPreviews();
         if (id === currentConversationId) return;
-        const conv = conversations.find(c => c.id === id);
+        const conv = ConversationStorage.getById(id);
         if (!conv) return;
+
+        pendingAttachments = [];
+        ChatUI.renderAttachmentPreviews([]);
+
         currentConversationId = id;
-        clearChat();
-        conv.messages.forEach(m => addMessage(m.role, m.content, false, m.attachments || []));
-        $('#empty-state').hide();
-        $('#chat-messages, #input-container').show();
-        updateChatHeader(conv.title);
-        if (conv.messages.length === 0) showStartChatting();
-        renderConversationList();
-        scrollToBottom();
-        const textarea = $('#user-message')[0];
-        if (textarea) {
-            textarea.style.height = 'auto';
-            textarea.style.height = Math.max(textarea.scrollHeight, 44) + 'px';
+        ChatUI.clearMessages();
+        ChatUI.showChatState();
+        ChatUI.updateChatHeader(conv.title);
+
+        if (conv.messages && conv.messages.length > 0) {
+            conv.messages.forEach(m => {
+                ChatUI.appendMessage(m.role, m.content, {
+                    attachments:       m.attachments || [],
+                    reasoning_content: m.reasoning_content || ''
+                });
+            });
+        } else {
+            ChatUI.showStartChatting();
         }
-        $('#user-message').focus();
+
+        refreshSidebar();
+        ChatUI.scrollToBottom();
+        setTimeout(() => $('#user-message').focus(), 50);
     }
 
     function newConversation() {
         pendingAttachments = [];
-        renderAttachmentPreviews();
-        const newId = 'conv_' + Date.now();
-        conversations.unshift({
-            id: newId,
-            title: 'New Chat',
-            messages: [],
-            timestamp: new Date()
-        });
-        currentConversationId = newId;
-        clearChat();
-        $('#empty-state').hide();
-        $('#chat-messages, #input-container').show();
-        showStartChatting();
-        updateChatHeader('New Chat');
-        closeDropdowns();
+        ChatUI.renderAttachmentPreviews([]);
+
+        const conv = ConversationStorage.create();
+        currentConversationId = conv.id;
+
+        ChatUI.closeDropdowns();
+        ChatUI.clearMessages();
+        ChatUI.showChatState();
+        ChatUI.showStartChatting();
+        ChatUI.updateChatHeader('New Chat');
+
         $('#user-message').val('');
-        const textarea = $('#user-message')[0];
-        if (textarea) {
-            textarea.style.height = 'auto';
-            textarea.style.height = Math.max(textarea.scrollHeight, 44) + 'px';
-        }
-        $('#user-message').focus();
+        ChatUI.autoResize($('#user-message')[0]);
+
+        refreshSidebar();
+        setTimeout(() => $('#user-message').focus(), 50);
     }
 
     function deleteConversation(id) {
         frappe.confirm('Are you sure you want to delete this conversation?', () => {
-            conversations = conversations.filter(c => c.id !== id);
+            ConversationStorage.deleteById(id);
+
             if (currentConversationId === id) {
-                const remaining = conversations.filter(c => c.messages.length > 0);
-                currentConversationId = remaining.length ? remaining[0].id : null;
-                if (currentConversationId) {
-                    loadConversation(currentConversationId);
+                const remaining = ConversationStorage.getAll();
+                if (remaining.length > 0) {
+                    loadConversation(remaining[0].id);
                 } else {
-                    $('#empty-state').show();
-                    $('#chat-messages, #input-container').hide();
-                    $('.start-chatting').remove();
-                    updateChatHeader('AI Assistant');
+                    currentConversationId = null;
+                    ChatUI.showEmptyState();
                 }
             }
-            renderConversationList();
-            showToast('Conversation deleted', 'red');
+
+            refreshSidebar();
+            frappe.show_alert({ message: 'Conversation deleted', indicator: 'red' }, 2);
         });
     }
 
-    // ========== FILE UPLOAD ==========
-    async function uploadAttachments() {
+    // ---- File uploads ----
+    async function uploadPendingAttachments() {
         const uploaded = [];
-        for (let att of pendingAttachments) {
+        for (const att of pendingAttachments) {
             try {
-                const result = await new Promise((resolve, reject) => {
-                    const formData = new FormData();
-                    formData.append('file', att.file);
-                    formData.append('is_private', 1);
-                    const xhr = new XMLHttpRequest();
-                    xhr.open('POST', '/api/method/upload_file', true);
-                    xhr.setRequestHeader('X-Frappe-CSRF-Token', frappe.csrf_token);
-                    xhr.onload = function () {
-                        if (xhr.status === 200) {
-                            const resp = JSON.parse(xhr.responseText);
-                            if (resp.message && resp.message.file_url) resolve(resp.message);
-                            else reject(new Error('Upload failed'));
-                        } else {
-                            reject(new Error('Upload failed'));
-                        }
-                    };
-                    xhr.onerror = () => reject(new Error('Network error'));
-                    xhr.send(formData);
-                });
-                uploaded.push({
-                    file_name: result.file_name || att.name,
-                    file_url: result.file_url
-                });
+                const result = await ChatApiService.uploadFile(att.file);
+                uploaded.push(result);
                 $(`.attachment-preview-item[data-id="${att.id}"] .thumb`).removeClass('uploading');
             } catch (err) {
-                showToast(`Failed to upload ${att.name}: ${err.message}`, 'red');
+                frappe.show_alert({ message: `Upload failed: ${att.name}`, indicator: 'red' }, 3);
             }
         }
         return uploaded;
     }
 
-    // ========== MESSAGE SENDING ==========
+    // ---- Send message ----
     async function sendMessage() {
+        if (isStreaming) return;
+
         const textarea = $('#user-message');
-        const message = textarea.val().trim();
+        const message  = textarea.val().trim();
 
         if (!message && pendingAttachments.length === 0) return;
 
-        if (!currentConversationId || !conversations.find(c => c.id === currentConversationId)) {
+        // Ensure we have an active conversation
+        if (!currentConversationId || !ConversationStorage.getById(currentConversationId)) {
             newConversation();
         }
-        const conv = conversations.find(c => c.id === currentConversationId);
-        if (!conv) return;
 
-        disableSend(true);
+        isStreaming    = true;
+        cancelStreaming = false;
+        ChatUI.setSendState(true);
 
+        // Upload attachments first
         let uploadedFiles = [];
         if (pendingAttachments.length > 0) {
-            uploadedFiles = await uploadAttachments();
+            uploadedFiles     = await uploadPendingAttachments();
             pendingAttachments = [];
-            renderAttachmentPreviews();
+            ChatUI.renderAttachmentPreviews([]);
         }
 
         if (!message && uploadedFiles.length === 0) {
-            disableSend(false);
+            isStreaming = false;
+            ChatUI.setSendState(false);
             return;
         }
 
-        const msgData = { role: 'user', content: message || '' };
-        if (uploadedFiles.length > 0) msgData.attachments = uploadedFiles;
-        conv.messages.push(msgData);
-        addMessage('user', msgData.content, false, uploadedFiles);
-        textarea.val('');
-        autoResize(textarea[0]);
+        // Persist user message
+        const userMsg = {
+            role:        'user',
+            content:     message || '',
+            attachments: uploadedFiles.length > 0 ? uploadedFiles : undefined,
+        };
+        ConversationStorage.addMessage(currentConversationId, userMsg);
 
-        // Auto-title from first user message
-        const userMsgCount = conv.messages.filter(m => m.role === 'user').length;
-        if (userMsgCount === 1 && message) {
-            conv.title = message.length > MAX_TITLE_LENGTH
-                ? message.substring(0, MAX_TITLE_LENGTH) + '...'
-                : message;
-            updateChatHeader(conv.title);
-            renderConversationList();
+        // Auto-title
+        const conv = ConversationStorage.getById(currentConversationId);
+        if (conv) {
+            const userCount = conv.messages.filter(m => m.role === 'user').length;
+            if (userCount === 1 && message) {
+                const title = ConversationStorage.autoTitle(message, MAX_TITLE_LENGTH);
+                ConversationStorage.rename(currentConversationId, title);
+                ChatUI.updateChatHeader(title);
+            }
         }
 
+        // Render user message immediately
+        ChatUI.appendMessage('user', userMsg.content, { attachments: uploadedFiles });
+        textarea.val('');
+        ChatUI.autoResize(textarea[0]);
         $('.start-chatting').remove();
 
-        // Thinking indicator
-        addMessage('assistant', '', true);
+        refreshSidebar(); // re-sort so this conv floats to top
 
-        setTimeout(() => {
-            $('#thinking-indicator').remove();
-            const response = dummyResponses[Math.floor(Math.random() * dummyResponses.length)];
-            conv.messages.push({ role: 'assistant', content: response });
-            addMessage('assistant', response);
-            disableSend(false);
-            $('#user-message').focus();
-        }, 1200 + Math.random() * 800);
-    }
+        // Show thinking state
+        ChatUI.showThinking();
 
-    // ========== ATTACHMENT PREVIEW (INPUT AREA) ==========
-    function truncateFileName(name) {
-        const max = 20;
-        if (name.length <= max) return name;
-        const ext = name.lastIndexOf('.');
-        if (ext === -1) return name.substring(0, max - 3) + '...';
-        const extension = name.substring(ext);
-        return name.substring(0, max - extension.length - 3) + '...' + extension;
-    }
+        // Build history for the API (all prior messages)
+        const freshConv = ConversationStorage.getById(currentConversationId);
+        const history   = freshConv
+            ? freshConv.messages.slice(0, -1) // exclude the message we just added (it's the "latest")
+            : [];
 
-    function renderAttachmentPreviews() {
-        const container = $('#attachment-previews');
-        container.empty();
-        pendingAttachments.forEach(att => {
-            const isImage = att.type.startsWith('image/');
-            const sizeStr = att.size < 1024 ? att.size + ' B'
-                : att.size < 1048576 ? (att.size / 1024).toFixed(1) + ' KB'
-                : (att.size / 1048576).toFixed(1) + ' MB';
-            const item = $(`
-                <div class="attachment-preview-item" data-id="${att.id}">
-                    ${isImage
-                        ? `<img class="thumb uploading" src="${URL.createObjectURL(att.file)}" alt="${att.name}">`
-                        : `<span class="file-icon">📄</span>`}
-                    <div class="file-info">
-                        <span class="file-name" title="${att.name}">${truncateFileName(att.name)}</span>
-                        <span class="file-size">${sizeStr}</span>
-                    </div>
-                    <span class="remove-file" data-id="${att.id}">✕</span>
-                </div>
-            `);
-            container.append(item);
-            if (isImage) {
-                const img = item.find('.thumb')[0];
-                img.src = img.src;
+        try {
+            const result = await ChatApiService.sendMessage(message, history);
+            ChatUI.removeThinking();
+
+            // Create streaming placeholder
+            const streamHandle = ChatUI.createStreamingMessage();
+
+            // Stream reasoning first (if present)
+            if (result.reasoning_content) {
+                await ChatApiService.simulateStream(
+                    result.reasoning_content,
+                    chunk => streamHandle.appendReasoning(chunk),
+                    () => cancelStreaming,
+                    5  // slightly faster for reasoning
+                );
+                streamHandle.finishReasoning();
             }
-        });
 
-        $('.remove-file').off('click').on('click', function (e) {
-            e.stopPropagation();
-            const id = $(this).data('id');
-            pendingAttachments = pendingAttachments.filter(a => a.id !== id);
-            renderAttachmentPreviews();
-        });
-    }
-
-    // ========== LIGHTBOX ==========
-    function openLightbox(url, name) {
-        $('#lightbox-image').attr('src', url).attr('alt', name);
-        $('#lightbox-modal').addClass('show');
-    }
-
-    function closeLightbox() {
-        $('#lightbox-modal').removeClass('show');
-        $('#lightbox-image').attr('src', '');
-    }
-
-    $(document).on('click', '#lightbox-close, .lightbox-overlay', closeLightbox);
-    $(document).on('keydown', function (e) {
-        if (e.key === 'Escape' && $('#lightbox-modal').hasClass('show')) closeLightbox();
-    });
-
-    // ========== EVENT BINDINGS ==========
-    $('#send-btn').on('click', sendMessage);
-
-    $('#user-message')
-        .on('keydown', function (e) {
-            if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                sendMessage();
+            if (cancelStreaming) {
+                streamHandle.finalise(result.content, result.reasoning_content);
+            } else {
+                // Stream main content
+                await ChatApiService.simulateStream(
+                    result.content,
+                    chunk => streamHandle.appendContent(chunk),
+                    () => cancelStreaming,
+                    8
+                );
+                streamHandle.finalise(result.content, result.reasoning_content);
             }
-        })
-        .on('input', function () {
-            autoResize(this);
-        });
 
-    $('#search-input').on('input', function () {
-        renderConversationList($(this).val());
-    });
+            // Persist assistant message
+            const assistantMsg = {
+                role:              'assistant',
+                content:           result.content,
+                reasoning_content: result.reasoning_content || undefined,
+            };
+            ConversationStorage.addMessage(currentConversationId, assistantMsg);
 
-    $('#attach-btn').on('click', function () {
-        $('#file-input').click();
-    });
+            // Refresh sidebar to update last_updated ordering
+            refreshSidebar();
 
-    $(document).on('click', function (e) {
-        if (!$(e.target).closest('.dropdown-menu, .more-btn').length) {
-            closeDropdowns();
+        } catch (err) {
+            ChatUI.removeThinking();
+
+            if (err.code === 'CANCELLED') {
+                // User cancelled — show partial content if any, else remove the row
+                // (the streamHandle may or may not exist — safe to ignore)
+            } else {
+                // Show error inside the message row
+                const errHandle = ChatUI.createStreamingMessage();
+                errHandle.showError(err.message || 'An error occurred. Please try again.');
+
+                // Bind retry
+                $(`#${errHandle.id}_retry`).on('click', () => {
+                    // Remove the error bubble and retry
+                    $(`#${errHandle.id}`).remove();
+                    // Remove the last (failed) user message from storage to avoid double-send
+                    const c = ConversationStorage.getById(currentConversationId);
+                    if (c && c.messages.length > 0 && c.messages[c.messages.length - 1].role === 'user') {
+                        c.messages.pop();
+                        ConversationStorage.save(c);
+                    }
+                    // Re-populate textarea and retry
+                    $('#user-message').val(message);
+                    ChatUI.autoResize($('#user-message')[0]);
+                    // Remove the user bubble that was rendered
+                    $('#chat-messages .message.user').last().remove();
+                    sendMessage();
+                });
+            }
+        } finally {
+            isStreaming    = false;
+            cancelStreaming = false;
+            ChatUI.setSendState(false);
+            setTimeout(() => $('#user-message').focus(), 50);
         }
+    }
+
+    function stopStreaming() {
+        if (isStreaming) {
+            cancelStreaming = true;
+            ChatApiService.cancel();
+        }
+    }
+
+
+    // =========================================================================
+    // EVENT BINDINGS
+    // =========================================================================
+
+    // Send
+    $('#send-btn').on('click', sendMessage);
+    $('#user-message')
+        .on('keydown', e => {
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+        })
+        .on('input', function () { ChatUI.autoResize(this); });
+
+    // Stop
+    $('#stop-btn').on('click', stopStreaming);
+
+    // New chat
+    $('#compose-btn').on('click', () => { ChatUI.closeDropdowns(); newConversation(); });
+
+    // Sidebar collapse / expand
+    $('#collapse-sidebar-btn').on('click', () => {
+        $('#sidebar').addClass('collapsed');
+        $('#expand-sidebar-btn').show();
+    });
+    $('#expand-sidebar-btn').on('click', () => {
+        $('#sidebar').removeClass('collapsed');
+        $('#expand-sidebar-btn').hide();
     });
 
+    // Search
+    $('#search-input').on('input', refreshSidebar);
+
+    // Attach file
+    $('#attach-btn').on('click', () => $('#file-input').click());
     $('#file-input').on('change', function (e) {
-        const files = Array.from(e.target.files);
-        if (!files.length) return;
-        const maxSize = 10 * 1024 * 1024;
-        const allowedTypes = [
-            'image/jpeg', 'image/png', 'image/gif', 'image/webp',
-            'application/pdf', 'application/msword',
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            'text/plain'
-        ];
-        for (let file of files) {
+        const files       = Array.from(e.target.files);
+        const maxSize     = 10 * 1024 * 1024;
+        const allowedTypes= ['image/jpeg','image/png','image/gif','image/webp',
+                             'application/pdf','application/msword',
+                             'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                             'text/plain'];
+        for (const file of files) {
             if (pendingAttachments.length >= 3) {
-                showToast('Maximum 3 attachments allowed', 'red');
+                frappe.show_alert({ message: 'Maximum 3 attachments allowed', indicator: 'red' }, 2);
                 break;
             }
             if (!allowedTypes.includes(file.type)) {
-                showToast(`File type not allowed: ${file.name}`, 'red');
+                frappe.show_alert({ message: `File type not allowed: ${file.name}`, indicator: 'red' }, 2);
                 continue;
             }
             if (file.size > maxSize) {
-                showToast(`File too large: ${file.name} (max 10MB)`, 'red');
+                frappe.show_alert({ message: `File too large: ${file.name}`, indicator: 'red' }, 2);
                 continue;
             }
-            const id = 'att_' + Date.now() + Math.random();
-            pendingAttachments.push({ id, file, name: file.name, size: file.size, type: file.type });
+            pendingAttachments.push({
+                id:   'att_' + Date.now() + Math.random(),
+                file, name: file.name, size: file.size, type: file.type
+            });
         }
         this.value = '';
-        renderAttachmentPreviews();
+        ChatUI.renderAttachmentPreviews(pendingAttachments);
+    });
+    // Remove attachment
+    $(document).on('click', '.remove-file', function (e) {
+        e.stopPropagation();
+        const id = $(this).data('id');
+        pendingAttachments = pendingAttachments.filter(a => a.id !== id);
+        ChatUI.renderAttachmentPreviews(pendingAttachments);
     });
 
-    // ========== INIT ==========
-    conversations = getDummyConversations();
-    currentConversationId = null;
-    isDarkMode = true;
-    applyTheme();
+    // Theme toggle
+    $('#theme-toggle-btn').on('click', () => {
+        isDarkMode = !isDarkMode;
+        ChatUI.applyTheme(isDarkMode);
+    });
 
-    $('#empty-state').show();
-    $('#chat-messages, #input-container').hide();
-    renderConversationList();
+    // Close dropdowns on outside click
+    $(document).on('click', e => {
+        if (!$(e.target).closest('.dropdown-menu, .more-btn').length) {
+            ChatUI.closeDropdowns();
+        }
+    });
 
-    const textarea = $('#user-message')[0];
-    if (textarea) {
-        textarea.style.height = 'auto';
-        textarea.style.height = Math.max(textarea.scrollHeight, 44) + 'px';
+    // Lightbox close
+    $(document).on('click', '#lightbox-close, .lightbox-overlay', () => {
+        $('#lightbox-modal').removeClass('show');
+        $('#lightbox-image').attr('src', '');
+    });
+    $(document).on('keydown', e => {
+        if (e.key === 'Escape' && $('#lightbox-modal').hasClass('show')) {
+            $('#lightbox-modal').removeClass('show');
+        }
+    });
+
+
+    // =========================================================================
+    // INIT
+    // =========================================================================
+    ChatUI.applyTheme(isDarkMode);
+    ChatUI.setSendState(false); // ensure stop-btn is hidden
+
+    // Load conversations from localStorage (seeding dummy data if empty)
+    let storedConvs = ConversationStorage.getAll();
+    if (storedConvs.length === 0) {
+        // Seed with representative dummy conversations so the sidebar is not empty
+        const seedData = [
+            {
+                title: 'How to build a REST API with Node.js',
+                messages: [
+                    { role: 'user', content: 'How do I build a REST API with Node.js?' },
+                    { role: 'assistant', content: 'Building a REST API with Node.js is straightforward. Here\'s a quick example using **Express**:\n\n```javascript\nconst express = require(\'express\');\nconst app = express();\n\napp.use(express.json());\n\napp.get(\'/api/users\', (req, res) => {\n  res.json({ users: [] });\n});\n\napp.listen(3000, () => console.log(\'Server running on port 3000\'));\n```\n\nThis sets up a basic GET endpoint.' }
+                ],
+                created_at:   new Date(Date.now() - 1000 * 60 * 5).toISOString(),
+                last_updated: new Date(Date.now() - 1000 * 60 * 5).toISOString(),
+            },
+            {
+                title: 'Best practices for React performance',
+                messages: [
+                    { role: 'user', content: 'What are best practices for React performance?' },
+                    { role: 'assistant', content: 'Key React performance practices:\n\n1. Use `React.memo` to prevent unnecessary re-renders\n2. Leverage `useMemo` and `useCallback`\n3. Code-split with `React.lazy`\n4. Virtualise long lists with `react-window`' }
+                ],
+                created_at:   new Date(Date.now() - 86400000).toISOString(),
+                last_updated: new Date(Date.now() - 86400000).toISOString(),
+            },
+            {
+                title: 'Docker container orchestration guide',
+                messages: [
+                    { role: 'user', content: 'Guide me on Docker container orchestration' },
+                    { role: 'assistant', content: 'Docker container orchestration with **Kubernetes** or **Docker Swarm** lets you manage container clusters at scale, handling scaling, networking, and self-healing automatically.' }
+                ],
+                created_at:   new Date(Date.now() - 3 * 86400000).toISOString(),
+                last_updated: new Date(Date.now() - 3 * 86400000).toISOString(),
+            }
+        ];
+        seedData.forEach(s => ConversationStorage.create(s));
     }
+
+    ChatUI.showEmptyState();
+    refreshSidebar();
+
+    // Textarea initial size
+    const ta = $('#user-message')[0];
+    if (ta) { ta.style.height = 'auto'; ta.style.height = Math.max(ta.scrollHeight, 44) + 'px'; }
 };

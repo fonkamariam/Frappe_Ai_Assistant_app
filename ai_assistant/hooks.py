@@ -9,6 +9,11 @@ page_js = {
     "ai-chat": "ai_assistant/page/ai_chat/ai_chat.js"
 }
 
+# Whitelisted API methods
+api_methods = {
+    "ai_assistant.ai_chat_api.send_message": "POST"
+}
+
 # Apps
 # ------------------
 
