@@ -28,8 +28,12 @@
         <div class="chat-messages" id="chat-messages" style="display:none;">
             <!-- messages appear here -->
         </div>
-
+        
         <div class="chat-input-container" id="input-container" style="display:none;">
+            <!-- Attachment previews (appears above the input) -->
+            <div class="attachment-previews" id="attachment-previews"></div>
+            <!-- Hidden file input -->
+            <input type="file" id="file-input" multiple accept="image/*,.pdf,.doc,.docx,.txt" style="display:none" />
             <div class="chat-input-wrapper">
                 <button class="btn btn-icon attach-btn" id="attach-btn" title="Attach file">
                     <i class="icon icon-plus"></i>
@@ -46,4 +50,12 @@
             </div>
         </div>
     </div>
+        <!-- Image lightbox modal -->
+    <div class="lightbox-modal" id="lightbox-modal">
+        <div class="lightbox-overlay"></div>
+        <div class="lightbox-content">
+            <span class="lightbox-close" id="lightbox-close">&times;</span>
+            <img id="lightbox-image" src="" alt="">
+        </div>
+</div>
 </div>

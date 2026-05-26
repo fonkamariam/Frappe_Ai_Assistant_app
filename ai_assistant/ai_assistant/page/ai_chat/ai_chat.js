@@ -10,6 +10,7 @@ frappe.pages['ai-chat'].on_page_load = async function(wrapper) {
 
     // ========== STATE ==========
     let currentConversationId = null;
+	let pendingAttachments = [];  // files not yet uploaded
     let conversations = [];
     const MAX_TITLE_LENGTH = 30;
 
@@ -187,17 +188,39 @@ frappe.pages['ai-chat'].on_page_load = async function(wrapper) {
     }
 
     // ========== MESSAGE RENDERING ==========
-    function addMessage(role, content, isThinking = false) {
-        const chatBox = $('#chat-messages');
-        if (isThinking) {
-            chatBox.append(`<div class="thinking">Thinking...</div>`);
-        } else {
-            const bubble = `<div class="message ${role}"><div class="bubble">${content}</div></div>`;
-            chatBox.append(bubble);
-        }
-        scrollToBottom();
-    }
-
+    function addMessage(role, content, isThinking = false, attachments = []) {
+		const chatBox = $('#chat-messages');
+		if (isThinking) {
+			chatBox.append(`<div class="thinking">Thinking...</div>`);
+			return;
+		}
+		let bubbleContent = '';
+		if (attachments && attachments.length > 0) {
+			const attHtml = attachments.map(a => {
+				const isImage = /\.(jpg|jpeg|png|gif|webp)$/i.test(a.file_url);
+				if (isImage) {
+					return `<div class="chat-attachment-preview" data-url="${a.file_url}" data-name="${a.file_name}">
+						<img src="${a.file_url}" alt="${a.file_name}">
+					</div>`;
+				} else {
+					return `<div class="chat-attachment-preview file-icon-preview">
+						<span>📄 ${a.file_name}</span>
+					</div>`;
+				}
+			}).join('');
+			bubbleContent += `<div class="attachments-grid">${attHtml}</div>`;
+		}
+		bubbleContent += content;
+		const bubble = `<div class="message ${role}"><div class="bubble">${bubbleContent}</div></div>`;
+		chatBox.append(bubble);
+		// Bind click for lightbox
+		$('.chat-attachment-preview[data-url]').off('click').on('click', function(e) {
+			const url = $(this).data('url');
+			const name = $(this).data('name');
+			openLightbox(url, name);
+		});
+		scrollToBottom();
+	}
     function clearChat() {
         $('#chat-messages').empty();
         $('.start-chatting').remove();
@@ -212,6 +235,8 @@ frappe.pages['ai-chat'].on_page_load = async function(wrapper) {
 
     // ========== CONVERSATION ACTIONS ==========
     function loadConversation(id) {
+		pendingAttachments = [];
+		renderAttachmentPreviews();
         if (id === currentConversationId) return; // already loaded
         const conv = conversations.find(c => c.id === id);
         if (!conv) return;
@@ -236,6 +261,8 @@ frappe.pages['ai-chat'].on_page_load = async function(wrapper) {
     }
 
     function newConversation() {
+		pendingAttachments = [];
+		renderAttachmentPreviews();
         const newId = 'conv_' + Date.now();
         conversations.unshift({
             id: newId,
@@ -276,49 +303,112 @@ frappe.pages['ai-chat'].on_page_load = async function(wrapper) {
             showToast('Conversation deleted', 'red');
         });
     }
+	async function uploadAttachments() {
+		const uploaded = [];
+		for (let att of pendingAttachments) {
+			try {
+				const file = att.file;
+				const result = await new Promise((resolve, reject) => {
+					const formData = new FormData();
+					formData.append('file', file);
+					formData.append('is_private', 1);
 
+					const xhr = new XMLHttpRequest();
+					xhr.open('POST', '/api/method/upload_file', true);
+					xhr.setRequestHeader('X-Frappe-CSRF-Token', frappe.csrf_token);
+					// no progress bar needed
+					xhr.onload = function() {
+						if (xhr.status === 200) {
+							const resp = JSON.parse(xhr.responseText);
+							if (resp.message && resp.message.file_url) {
+								resolve(resp.message);
+							} else {
+								reject(new Error('Upload failed'));
+							}
+						} else {
+							reject(new Error('Upload failed'));
+						}
+					};
+					xhr.onerror = () => reject(new Error('Network error'));
+					xhr.send(formData);
+				});
+				uploaded.push({
+					file_name: result.file_name || att.name,
+					file_url: result.file_url
+				});
+				// Remove blur from preview
+				$(`.attachment-preview-item[data-id="${att.id}"] .thumb`).removeClass('uploading');
+			} catch (err) {
+				showToast(`Failed to upload ${att.name}: ${err.message}`, 'red');
+			}
+		}
+		return uploaded;
+	}
     // ========== MESSAGE SENDING ==========
     async function sendMessage() {
-        const textarea = $('#user-message');
-        const message = textarea.val().trim();
-        if (!message) return;
+		const textarea = $('#user-message');
+		const message = textarea.val().trim();
 
-        if (!currentConversationId || !conversations.find(c => c.id === currentConversationId)) {
-            newConversation();
-        }
-        const conv = conversations.find(c => c.id === currentConversationId);
-        if (!conv) return;
+		// Allow sending if there are attachments, even without text
+		if (!message && pendingAttachments.length === 0) return;
 
-        conv.messages.push({ role: 'user', content: message });
-        addMessage('user', message);
-        textarea.val('');
-        autoResize(textarea[0]);
+		if (!currentConversationId || !conversations.find(c => c.id === currentConversationId)) {
+			newConversation();
+		}
+		const conv = conversations.find(c => c.id === currentConversationId);
+		if (!conv) return;
 
-        // Update title and header if this is the first user message
-        const userMsgCount = conv.messages.filter(m => m.role === 'user').length;
-        if (userMsgCount === 1) {
-            conv.title = message.length > MAX_TITLE_LENGTH ? message.substring(0, MAX_TITLE_LENGTH) + '...' : message;
-            updateChatHeader(conv.title);
-            renderConversationList();
-        }
+		// Disable UI
+		disableSend(true);
 
-        // Remove "Start Chatting" now that we have messages
-        $('.start-chatting').remove();
+		// Upload attachments if any
+		let uploadedFiles = [];
+		if (pendingAttachments.length > 0) {
+			uploadedFiles = await uploadAttachments();
+			pendingAttachments = [];
+			renderAttachmentPreviews();
+		}
 
-        disableSend(true);
-        addMessage('assistant', '', true);
+		// If after upload there is still nothing to send (all failed), abort
+		if (!message && uploadedFiles.length === 0) {
+			disableSend(false);
+			return;
+		}
 
-        setTimeout(() => {
-            $('.thinking').remove();
-            const response = dummyResponses[Math.floor(Math.random() * dummyResponses.length)];
-            conv.messages.push({ role: 'assistant', content: response });
-            addMessage('assistant', response);
-            disableSend(false);
-            // Ensure input is focused after response
-            $('#user-message').focus();
-        }, 1500 + Math.random() * 1000);
-    }
+		// Add user message (text + attachments)
+		const msgData = { role: 'user', content: message || '' };
+		if (uploadedFiles.length > 0) {
+			msgData.attachments = uploadedFiles;
+		}
+		conv.messages.push(msgData);
+		// Render the user message with attachments
+		addMessage('user', msgData.content, false, uploadedFiles);
+		textarea.val('');
+		autoResize(textarea[0]);
 
+		// Update title if first user message
+		const userMsgCount = conv.messages.filter(m => m.role === 'user').length;
+		if (userMsgCount === 1 && message) {
+			conv.title = message.length > MAX_TITLE_LENGTH ? message.substring(0, MAX_TITLE_LENGTH) + '...' : message;
+			updateChatHeader(conv.title);
+			renderConversationList();
+		}
+
+		// Remove "Start Chatting"
+		$('.start-chatting').remove();
+
+		// Simulate AI thinking
+		addMessage('assistant', '', true);
+
+		setTimeout(() => {
+			$('.thinking').remove();
+			const response = dummyResponses[Math.floor(Math.random() * dummyResponses.length)];
+			conv.messages.push({ role: 'assistant', content: response });
+			addMessage('assistant', response);
+			disableSend(false);
+			$('#user-message').focus();
+		}, 1500 + Math.random() * 1000);
+	}
     // ========== EVENT BINDINGS ==========
     $('#new-chat-btn').on('click', function() {
         closeDropdowns();
@@ -336,16 +426,112 @@ frappe.pages['ai-chat'].on_page_load = async function(wrapper) {
     $('#search-input').on('input', function() {
         renderConversationList($(this).val());
     });
-    $('#attach-btn').on('click', function() {
-        showToast('File upload will be added in Phase 6', 'orange');
-    });
-
+    
+	$('#attach-btn').on('click', function() {
+		$('#file-input').click();
+	});
+	
     $(document).on('click', function(e) {
         if (!$(e.target).closest('.dropdown-menu, .more-btn').length) {
             closeDropdowns();
         }
     });
+	// Handle file selection
+		$('#file-input').on('change', function(e) {
+			const files = Array.from(e.target.files);
+			if (!files.length) return;
 
+			// Validate each file
+			const maxSize = 10 * 1024 * 1024; // 10MB
+			const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp',
+								'application/pdf', 'application/msword',
+								'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+								'text/plain'];
+
+			for (let file of files) {
+				if (pendingAttachments.length >= 3) {
+					showToast('Maximum 3 attachments allowed', 'red');
+					break;                              // stop processing further files
+				}
+				if (!allowedTypes.includes(file.type)) {
+					showToast(`File type not allowed: ${file.name}`, 'red');
+					continue;
+				}
+				if (file.size > maxSize) {
+					showToast(`File too large: ${file.name} (max 10MB)`, 'red');
+					continue;
+				}
+				// Add to pending list with a unique id
+				const id = 'att_' + Date.now() + Math.random();
+				pendingAttachments.push({ id, file, name: file.name, size: file.size, type: file.type });
+			}
+			// Reset file input value so same file can be re-selected if removed
+			this.value = '';
+			renderAttachmentPreviews();
+		});
+
+		// Render the attachment previews
+		function renderAttachmentPreviews() {
+			const container = $('#attachment-previews');
+			container.empty();
+			pendingAttachments.forEach(att => {
+				const isImage = att.type.startsWith('image/');
+				const sizeStr = att.size < 1024 ? att.size + ' B' :
+								att.size < 1048576 ? (att.size / 1024).toFixed(1) + ' KB' :
+								(att.size / 1048576).toFixed(1) + ' MB';
+				const item = $(`
+					<div class="attachment-preview-item" data-id="${att.id}">
+						${isImage 
+							? `<img class="thumb uploading" src="${URL.createObjectURL(att.file)}" alt="${att.name}">`
+							: `<span class="file-icon">📄</span>`}
+						<div class="file-info">
+							<span class="file-name" title="${att.name}">${truncateFileName(att.name)}</span>
+							<span class="file-size">${sizeStr}</span>
+						</div>
+						<span class="remove-file" data-id="${att.id}">✕</span>
+					</div>
+				`);
+				container.append(item);
+				// Force image paint
+				if (isImage) {
+					item.find('.thumb')[0].src = item.find('.thumb')[0].src;
+				}
+			});
+
+			// Remove button click
+			$('.remove-file').off('click').on('click', function(e) {
+				e.stopPropagation();
+				const id = $(this).data('id');
+				pendingAttachments = pendingAttachments.filter(a => a.id !== id);
+				renderAttachmentPreviews();
+			});
+		}
+
+		// Helper to truncate long file names
+		function truncateFileName(name) {
+			const max = 20;
+			if (name.length <= max) return name;
+			const ext = name.lastIndexOf('.');
+			if (ext === -1) return name.substring(0, max - 3) + '...';
+			const extension = name.substring(ext);
+			return name.substring(0, max - extension.length - 3) + '...' + extension;
+		}
+	function openLightbox(url, name) {
+		$('#lightbox-image').attr('src', url).attr('alt', name);
+		$('#lightbox-modal').addClass('show');
+	}
+
+	function closeLightbox() {
+		$('#lightbox-modal').removeClass('show');
+		$('#lightbox-image').attr('src', '');
+	}
+
+	$(document).on('click', '#lightbox-close, .lightbox-overlay', closeLightbox);
+	$(document).on('keydown', function(e) {
+		if (e.key === 'Escape' && $('#lightbox-modal').hasClass('show')) {
+			closeLightbox();
+		}
+	});
 	// ========== INIT ==========
     conversations = getDummyConversations();
     // Do NOT auto‑select any conversation – remain in the empty welcome state
