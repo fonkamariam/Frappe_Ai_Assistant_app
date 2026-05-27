@@ -451,6 +451,7 @@
     font-size: 14px;
     word-wrap: break-word;
     overflow-wrap: break-word;
+    position: relative;
 }
 .message.user .bubble {
     background: var(--user-bubble-bg);
@@ -904,12 +905,9 @@
 /* ============================================================
    COPY MESSAGE BUTTON
    ============================================================ */
-.bubble {
-    position: relative;
-}
 .copy-msg-btn {
     position: absolute;
-    top: 6px;
+    bottom: 6px;
     right: 6px;
     background: var(--surface-2);
     border: 1px solid var(--sidebar-border);

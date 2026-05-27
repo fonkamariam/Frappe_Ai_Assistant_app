@@ -591,21 +591,12 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
                             </div>
                             <div class="stream-content" id="${msgId}_content"></div>
                             <span class="stream-cursor" id="${msgId}_cursor">▋</span>
+                            <button class="copy-msg-btn" title="Copy message" style="display:none;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
                         </div>
                     </div>
                 </div>`);
 
             scrollToBottom();
-
-            // Bind reasoning toggle for this message
-            $(`#${msgId} .reasoning-toggle`).on('click', function (e) {
-                e.preventDefault();
-                const block = $(`#${msgId}_reasoning`);
-                block.toggleClass('open');
-                $(this).find('.reasoning-toggle-icon').text(
-                    block.hasClass('open') ? '▼' : '▶'
-                );
-            });
 
             return {
                 /**
@@ -835,9 +826,11 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
             chatBox.find('.copy-msg-btn').off('click.ai').on('click.ai', function (e) {
                 e.stopPropagation();
                 const bubble = $(this).closest('.bubble');
-                // Get text content, excluding code blocks
+                // Get text content, excluding code blocks and reasoning
                 let text = bubble.clone();
                 text.find('.code-block-wrap').remove();
+                text.find('.reasoning-block').remove();
+                text.find('.copy-msg-btn').remove();
                 text = text.text().trim();
                 
                 navigator.clipboard.writeText(text).then(() => {
@@ -850,7 +843,8 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
             });
 
             // Reasoning toggles
-            chatBox.find('.reasoning-toggle').off('click.ai').on('click.ai', function () {
+            chatBox.find('.reasoning-toggle').off('click.ai').on('click.ai', function (e) {
+                e.preventDefault();
                 const block = $(this).closest('.reasoning-block');
                 block.toggleClass('open');
                 $(this).find('.reasoning-toggle-icon').text(block.hasClass('open') ? '▼' : '▶');
