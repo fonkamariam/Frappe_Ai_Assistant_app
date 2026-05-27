@@ -21,8 +21,8 @@ import requests
 # Configuration constants
 # ---------------------------------------------------------------------------
 OPENROUTER_API_URL   = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL        = "gpt-3.5-turbo"
-DEFAULT_MAX_TOKENS   = 2048
+DEFAULT_MODEL        =  frappe.conf.get("openrouter_model", "deepseek/deepseek-r1:free")
+DEFAULT_MAX_TOKENS   = 4096
 REQUEST_TIMEOUT      = 120          # seconds — R1 can be slow on first token
 MAX_HISTORY_MESSAGES = 20           # cap history to avoid huge payloads
 RETRY_WAIT_SECONDS   = 2            # used in error messages
@@ -313,6 +313,27 @@ def _call_openrouter(api_key, messages, model, max_tokens):
 
 
 # ---------------------------------------------------------------------------
+# Mock reasoning generator (for UI testing)
+# ---------------------------------------------------------------------------
+def _generate_mock_reasoning(message):
+    """
+    Generate mock reasoning content for UI testing.
+    Simulates how DeepSeek R1 would reason through a problem.
+    """
+    reasoning_samples = {
+        "default": "This is a mock reasoning process. because this model doesn't support real reasoning content. In a real scenario, the reasoning_content would include the AI's step-by-step thought process, considerations, and how it arrived at the final answer. This helps users understand the AI's logic and builds trust in its responses."
+    }
+    
+    # Find the most relevant sample
+    msg_lower = message.lower()
+    for key, reasoning in reasoning_samples.items():
+        if key in msg_lower:
+            return reasoning
+    
+    return reasoning_samples["default"]
+
+
+# ---------------------------------------------------------------------------
 # Public Frappe endpoint
 # ---------------------------------------------------------------------------
 @frappe.whitelist()
@@ -390,6 +411,10 @@ def send_message(message, history=None):
                 return _error_response(err["code"], err["message"], status_code=502)
             except Exception:
                 return _error_response(ApiError.UPSTREAM, "An unexpected error occurred.", status_code=502)
+
+        # ---- Add mock reasoning_content for UI testing (if not present) ----
+        if not result.get("reasoning_content"):
+            result["reasoning_content"] = _generate_mock_reasoning(message)
 
         return _success_response(
             content=result["content"],

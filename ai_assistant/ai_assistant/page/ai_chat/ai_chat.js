@@ -556,7 +556,10 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
                     ${avatarHtml}
                     <div class="msg-body">
                         <span class="msg-author">${authorLabel}</span>
-                        <div class="bubble">${bubbleContent}</div>
+                        <div class="bubble">
+                            ${bubbleContent}
+                            ${role === 'assistant' ? `<button class="copy-msg-btn" title="Copy message" style="display:none;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>` : ''}
+                        </div>
                     </div>
                 </div>`;
 
@@ -584,7 +587,7 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
                                     <span class="reasoning-toggle-icon">▶</span>
                                     <span class="reasoning-label">Thinking…</span>
                                 </button>
-                                <div class="reasoning-content" id="${msgId}_reasoning_content"></div>
+                                <div class="reasoning-content" id="${msgId}_reasoning_content" style="white-space: pre-wrap; word-break: break-word;"></div>
                             </div>
                             <div class="stream-content" id="${msgId}_content"></div>
                             <span class="stream-cursor" id="${msgId}_cursor">▋</span>
@@ -595,7 +598,8 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
             scrollToBottom();
 
             // Bind reasoning toggle for this message
-            $(`#${msgId} .reasoning-toggle`).on('click', function () {
+            $(`#${msgId} .reasoning-toggle`).on('click', function (e) {
+                e.preventDefault();
                 const block = $(`#${msgId}_reasoning`);
                 block.toggleClass('open');
                 $(this).find('.reasoning-toggle-icon').text(
@@ -614,18 +618,18 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
                         block.show();
                     }
                     const el = $(`#${msgId}_reasoning_content`);
-                    el.text(el.text() + text);
+                    el.append(document.createTextNode(text));
                     scrollToBottom();
                 },
 
                 /**
-                 * Mark reasoning as complete — update label.
+                 * Mark reasoning as complete — update label and make toggleable.
                  */
                 finishReasoning() {
-                    $(`#${msgId}_reasoning`)
-                        .removeClass('reasoning-thinking')
-                        .addClass('reasoning-done');
-                    $(`#${msgId}_reasoning .reasoning-label`).text('Thought process');
+                    const block = $(`#${msgId}_reasoning`);
+                    block.removeClass('reasoning-thinking').addClass('reasoning-done open');
+                    block.find('.reasoning-label').text('Thought process');
+                    block.find('.reasoning-toggle-icon').text('▼');
                 },
 
                 /**
@@ -797,17 +801,51 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
         }
 
         function _bindBubbleEvents(chatBox) {
+            // Helper to decode HTML entities
+            const decodeHtml = (html) => {
+                const txt = document.createElement('textarea');
+                txt.innerHTML = html;
+                return txt.value;
+            };
+
             // Copy code buttons
             chatBox.find('.copy-code-btn').off('click.ai').on('click.ai', function () {
-                const code = $(this).attr('data-code')
-                    .replace(/&amp;/g,'&').replace(/&lt;/g,'<')
-                    .replace(/&gt;/g,'>').replace(/&quot;/g,'"');
+                let code = $(this).attr('data-code');
+                // Decode HTML entities
+                code = decodeHtml(code);
+                // Remove any remaining HTML tags
+                code = code.replace(/<[^>]*>/g, '');
+                
                 navigator.clipboard.writeText(code).then(() => {
                     const btn = $(this);
                     btn.html(`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Copied!`);
                     setTimeout(() => btn.html(
                         `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy`
                     ), 2000);
+                }).catch(() => frappe.show_alert({ message: 'Copy failed', indicator: 'red' }, 2));
+            });
+
+            // Copy message button (hover on bubble) - copy just the text content, not HTML
+            chatBox.find('.bubble').off('mouseenter.ai mouseleave.ai').on('mouseenter.ai', function() {
+                $(this).find('.copy-msg-btn').show();
+            }).on('mouseleave.ai', function() {
+                $(this).find('.copy-msg-btn').hide();
+            });
+
+            chatBox.find('.copy-msg-btn').off('click.ai').on('click.ai', function (e) {
+                e.stopPropagation();
+                const bubble = $(this).closest('.bubble');
+                // Get text content, excluding code blocks
+                let text = bubble.clone();
+                text.find('.code-block-wrap').remove();
+                text = text.text().trim();
+                
+                navigator.clipboard.writeText(text).then(() => {
+                    const btn = $(this);
+                    btn.html(`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>`);
+                    setTimeout(() => btn.html(
+                        `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`
+                    ), 1500);
                 }).catch(() => frappe.show_alert({ message: 'Copy failed', indicator: 'red' }, 2));
             });
 

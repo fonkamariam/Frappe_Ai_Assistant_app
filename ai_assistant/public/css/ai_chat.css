@@ -901,3 +901,29 @@
     object-fit: contain;
     border-radius: var(--border-radius-sm);
 }
+/* ============================================================
+   COPY MESSAGE BUTTON
+   ============================================================ */
+.bubble {
+    position: relative;
+}
+.copy-msg-btn {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    background: var(--surface-2);
+    border: 1px solid var(--sidebar-border);
+    border-radius: 4px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 4px 6px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    transition: all var(--transition);
+}
+.copy-msg-btn:hover {
+    background: var(--surface-hover);
+    color: var(--text-primary);
+}
