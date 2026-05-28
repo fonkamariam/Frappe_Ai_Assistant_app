@@ -147,6 +147,56 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
 
 
     // =========================================================================
+    // DRAFT STORAGE — Manages draft messages per conversation
+    // =========================================================================
+    const DraftStorage = (() => {
+        const DRAFT_STORAGE_KEY = 'ai_chat_drafts_v1';
+
+        function _load() {
+            try {
+                const raw = localStorage.getItem(DRAFT_STORAGE_KEY);
+                if (!raw) return {};
+                const parsed = JSON.parse(raw);
+                return typeof parsed === 'object' ? parsed : {};
+            } catch {
+                return {};
+            }
+        }
+
+        function _save(drafts) {
+            try {
+                localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(drafts));
+            } catch (e) {
+                console.warn('AI Chat: Draft storage save failed', e);
+            }
+        }
+
+        function getDraft(convId) {
+            const drafts = _load();
+            return drafts[convId] || '';
+        }
+
+        function saveDraft(convId, text) {
+            const drafts = _load();
+            if (text.trim()) {
+                drafts[convId] = text;
+            } else {
+                delete drafts[convId];
+            }
+            _save(drafts);
+        }
+
+        function clearDraft(convId) {
+            const drafts = _load();
+            delete drafts[convId];
+            _save(drafts);
+        }
+
+        return { getDraft, saveDraft, clearDraft };
+    })();
+
+
+    // =========================================================================
     // LAYER 2: ChatApiService
     // Responsible for: HTTP calls, streaming simulation, error normalisation,
     //                  retry logic, abort control.
@@ -525,7 +575,7 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
          * Append a completed message bubble to the chat.
          */
         function appendMessage(role, content, opts = {}) {
-            const { attachments = [], reasoning_content = '', messageId = null } = opts;
+            const { attachments = [], reasoning_content = '', messageId = null, error = null, messageIndex = null, convId = null } = opts;
             const chatBox    = $('#chat-messages');
             const isUser     = role === 'user';
             const authorLabel= isUser ? 'You' : 'AI Assistant';
@@ -545,9 +595,30 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
                 bubbleContent += _buildAttachmentsHtml(attachments);
             }
 
-            // Main text
+            // Main text (show even if there's an error)
             if (content) {
                 bubbleContent += renderMarkdown(content);
+            }
+
+            // Error state for user messages (appears after the message content)
+            if (error && isUser) {
+                // Check if it's an interrupted state
+                const isInterrupted = error.isInterrupted === true;
+                const errorClass = isInterrupted ? 'msg-error msg-interrupted' : 'msg-error';
+                const errorIcon = isInterrupted 
+                    ? '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>'
+                    : '<circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>';
+                
+                bubbleContent += `
+                    <div class="${errorClass}">
+                        <div>
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                ${errorIcon}
+                            </svg>
+                            ${error.message}
+                        </div>
+                        <button class="retry-btn" data-msg-index="${messageIndex}" data-conv-id="${convId}">Try again</button>
+                    </div>`;
             }
 
             const idAttr = messageId ? `id="${messageId}"` : '';
@@ -564,6 +635,22 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
                 </div>`;
 
             chatBox.append(msgHtml);
+            
+            // Bind error retry and delete buttons for persisted errors
+            if (error && isUser && messageIndex !== null && convId !== null) {
+                setTimeout(() => {
+                    const retryBtn = chatBox.find(`button.retry-btn[data-msg-index="${messageIndex}"][data-conv-id="${convId}"]`);
+                    
+                    retryBtn.on('click', function(e) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        const msgIdx = parseInt($(this).attr('data-msg-index'));
+                        const cId = $(this).attr('data-conv-id');
+                        retryFailedMessage(cId, msgIdx);
+                    });
+                }, 0);
+            }
+            
             _bindBubbleEvents(chatBox);
             scrollToBottom();
         }
@@ -931,10 +1018,16 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
     }
 
     // ---- Conversation management ----
-    function loadConversation(id) {
+     function loadConversation(id) {
         if (id === currentConversationId) return;
         const conv = ConversationStorage.getById(id);
         if (!conv) return;
+
+        // Save current draft before switching away
+        if (currentConversationId) {
+            const currentText = $('#user-message').val();
+            DraftStorage.saveDraft(currentConversationId, currentText);
+        }
 
         pendingAttachments = [];
         ChatUI.renderAttachmentPreviews([]);
@@ -945,15 +1038,23 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
         ChatUI.updateChatHeader(conv.title);
 
         if (conv.messages && conv.messages.length > 0) {
-            conv.messages.forEach(m => {
+            conv.messages.forEach((m, idx) => {
                 ChatUI.appendMessage(m.role, m.content, {
                     attachments:       m.attachments || [],
-                    reasoning_content: m.reasoning_content || ''
+                    reasoning_content: m.reasoning_content || '',
+                    error:             m.error || null,  // Restore error state
+                    messageIndex:      idx,
+                    convId:            id
                 });
             });
         } else {
             ChatUI.showStartChatting();
         }
+
+        // Restore draft for this conversation
+        const draft = DraftStorage.getDraft(id);
+        $('#user-message').val(draft);
+        ChatUI.autoResize($('#user-message')[0]);
 
         refreshSidebar();
         ChatUI.scrollToBottom();
@@ -1014,6 +1115,161 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
         return uploaded;
     }
 
+    // ---- Retry failed message (without creating duplicate) ----
+    async function retryFailedMessage(convId, messageIndex) {
+        if (isStreaming) return;
+
+        const conv = ConversationStorage.getById(convId);
+        if (!conv || !conv.messages[messageIndex]) return;
+
+        currentConversationId = convId;
+        const userMsg = conv.messages[messageIndex];
+        const message = userMsg.content;
+
+        isStreaming = true;
+        cancelStreaming = false;
+        ChatUI.setSendState(true);
+
+        // Remove error UI from the message
+        $(`#chat-messages .message.user`).last().find('.msg-error').remove();
+
+        // Show thinking state
+        ChatUI.showThinking();
+
+        // Build history (all messages except this one)
+        const history = conv.messages.slice(0, messageIndex);
+
+        try {
+            const result = await ChatApiService.sendMessage(message, history);
+            ChatUI.removeThinking();
+
+            // Create streaming placeholder
+            const streamHandle = ChatUI.createStreamingMessage();
+
+            // Stream reasoning first (if present)
+            if (result.reasoning_content) {
+                await ChatApiService.simulateStream(
+                    result.reasoning_content,
+                    chunk => streamHandle.appendReasoning(chunk),
+                    () => cancelStreaming,
+                    5
+                );
+                streamHandle.finishReasoning();
+            }
+
+            if (cancelStreaming) {
+                streamHandle.finalise(result.content, result.reasoning_content);
+            } else {
+                // Stream main content
+                await ChatApiService.simulateStream(
+                    result.content,
+                    chunk => streamHandle.appendContent(chunk),
+                    () => cancelStreaming,
+                    8
+                );
+                streamHandle.finalise(result.content, result.reasoning_content);
+            }
+
+            // Remove error/interrupted message from the user bubble (success!)
+            const userMessageEl = $(`#chat-messages .message.user`).last();
+            userMessageEl.find('.msg-error').remove();
+            userMessageEl.find('.msg-interrupted').remove();
+
+            // Clear the error state from storage
+            userMsg.error = null;
+            ConversationStorage.save(conv);
+
+            // Persist assistant message
+            const assistantMsg = {
+                role: 'assistant',
+                content: result.content,
+                reasoning_content: result.reasoning_content || undefined,
+            };
+            ConversationStorage.addMessage(convId, assistantMsg);
+
+        } catch (err) {
+            ChatUI.removeThinking();
+
+            if (err.code === 'CANCELLED') {
+                // User stopped the message - show "Interrupted" with retry button
+                const userMessageBubble = $(`#chat-messages .message.user`).last().find('.bubble');
+                const interruptedHtml = `
+                    <div class="msg-error msg-interrupted">
+                        <div>
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                            </svg>
+                            Interrupted
+                        </div>
+                        <button class="retry-btn" data-msg-index="${messageIndex}" data-conv-id="${convId}">Try again</button>
+                    </div>`;
+                
+                userMessageBubble.append(interruptedHtml);
+                
+                // Store interrupted state to localStorage so it persists on reload
+                userMsg.error = {
+                    message: 'Interrupted',
+                    isInterrupted: true,
+                    timestamp: new Date().toISOString()
+                };
+                ConversationStorage.save(conv);
+                
+                // Bind retry button
+                const interruptedMsg = userMessageBubble.find('.msg-interrupted');
+                if (interruptedMsg.length) {
+                    interruptedMsg.find('.retry-btn').on('click', function(e) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        const msgIdx = parseInt($(this).attr('data-msg-index'));
+                        const cId = $(this).attr('data-conv-id');
+                        retryFailedMessage(cId, msgIdx);
+                    });
+                }
+            } else {
+                // Show error again
+                const userMessageBubble = $(`#chat-messages .message.user`).last().find('.bubble');
+                const errorHtml = `
+                    <div class="msg-error">
+                        <div>
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <circle cx="12" cy="12" r="10"/>
+                                <line x1="12" y1="8" x2="12" y2="12"/>
+                                <line x1="12" y1="16" x2="12.01" y2="16"/>
+                            </svg>
+                            ${err.message || 'An error occurred. Please try again.'}
+                        </div>
+                        <button class="retry-btn" data-msg-index="${messageIndex}" data-conv-id="${convId}">Try again</button>
+                    </div>`;
+                
+                userMessageBubble.append(errorHtml);
+                
+                // Bind retry button using event delegation on the bubble
+                const errorMsg = userMessageBubble.find('.msg-error');
+                if (errorMsg.length) {
+                    errorMsg.find('.retry-btn').on('click', function(e) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        const msgIdx = parseInt($(this).attr('data-msg-index'));
+                        const cId = $(this).attr('data-conv-id');
+                        retryFailedMessage(cId, msgIdx);
+                    });
+                }
+                
+                // Update error state in storage
+                userMsg.error = {
+                    message: err.message || 'An error occurred. Please try again.',
+                    timestamp: new Date().toISOString()
+                };
+                ConversationStorage.save(conv);
+            }
+        } finally {
+            isStreaming = false;
+            cancelStreaming = false;
+            ChatUI.setSendState(false);
+            setTimeout(() => $('#user-message').focus(), 50);
+        }
+    }
+
     // ---- Send message ----
     async function sendMessage() {
         if (isStreaming) return;
@@ -1069,6 +1325,10 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
         ChatUI.appendMessage('user', userMsg.content, { attachments: uploadedFiles });
         textarea.val('');
         ChatUI.autoResize(textarea[0]);
+        
+        // Clear draft for this conversation
+        DraftStorage.clearDraft(currentConversationId);
+        
         $('.start-chatting').remove();
 
         refreshSidebar(); // re-sort so this conv floats to top
@@ -1131,27 +1391,48 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
                 // User cancelled — show partial content if any, else remove the row
                 // (the streamHandle may or may not exist — safe to ignore)
             } else {
-                // Show error inside the message row
-                const errHandle = ChatUI.createStreamingMessage();
-                errHandle.showError(err.message || 'An error occurred. Please try again.');
+                // Persist error state to the last user message
+                const conv = ConversationStorage.getById(currentConversationId);
+                if (conv && conv.messages.length > 0 && conv.messages[conv.messages.length - 1].role === 'user') {
+                    const lastMsg = conv.messages[conv.messages.length - 1];
+                    lastMsg.error = {
+                        message: err.message || 'An error occurred. Please try again.',
+                        timestamp: new Date().toISOString()
+                    };
+                    ConversationStorage.save(conv);
+                }
 
-                // Bind retry
-                $(`#${errHandle.id}_retry`).on('click', () => {
-                    // Remove the error bubble and retry
-                    $(`#${errHandle.id}`).remove();
-                    // Remove the last (failed) user message from storage to avoid double-send
-                    const c = ConversationStorage.getById(currentConversationId);
-                    if (c && c.messages.length > 0 && c.messages[c.messages.length - 1].role === 'user') {
-                        c.messages.pop();
-                        ConversationStorage.save(c);
-                    }
-                    // Re-populate textarea and retry
-                    $('#user-message').val(message);
-                    ChatUI.autoResize($('#user-message')[0]);
-                    // Remove the user bubble that was rendered
-                    $('#chat-messages .message.user').last().remove();
-                    sendMessage();
-                });
+                // Show error in the user message bubble (not as a separate assistant message)
+                const userMessageBubble = $('#chat-messages .message.user').last().find('.bubble');
+                const messageIndex = (conv && conv.messages) ? conv.messages.length - 1 : null;
+                const convId = currentConversationId;
+                
+                const errorHtml = `
+                    <div class="msg-error">
+                        <div>
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <circle cx="12" cy="12" r="10"/>
+                                <line x1="12" y1="8" x2="12" y2="12"/>
+                                <line x1="12" y1="16" x2="12.01" y2="16"/>
+                            </svg>
+                            ${err.message || 'An error occurred. Please try again.'}
+                        </div>
+                        <button class="retry-btn" data-msg-index="${messageIndex}" data-conv-id="${convId}">Try again</button>
+                    </div>`;
+                
+                userMessageBubble.append(errorHtml);
+                
+                // Bind retry button using event delegation
+                const errorMsg = userMessageBubble.find('.msg-error');
+                if (errorMsg.length) {
+                    errorMsg.find('.retry-btn').on('click', function(e) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        const msgIdx = parseInt($(this).attr('data-msg-index'));
+                        const cId = $(this).attr('data-conv-id');
+                        retryFailedMessage(cId, msgIdx);
+                    });
+                }
             }
         } finally {
             isStreaming    = false;
@@ -1175,11 +1456,28 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
 
     // Send
     $('#send-btn').on('click', sendMessage);
+    
+    // Draft saving with 1.5 second debounce
+    let draftTimeout = null;
     $('#user-message')
         .on('keydown', e => {
             if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
         })
-        .on('input', function () { ChatUI.autoResize(this); });
+        .on('input', function () {
+            ChatUI.autoResize(this);
+            
+            // Clear existing draft timeout
+            if (draftTimeout) clearTimeout(draftTimeout);
+            
+            // Set new timeout to save draft after 1.5 seconds of inactivity
+            draftTimeout = setTimeout(() => {
+                const text = $(this).val();
+                if (currentConversationId) {
+                    DraftStorage.saveDraft(currentConversationId, text);
+                }
+                draftTimeout = null;
+            }, 1500);
+        });
 
     // Stop
     $('#stop-btn').on('click', stopStreaming);

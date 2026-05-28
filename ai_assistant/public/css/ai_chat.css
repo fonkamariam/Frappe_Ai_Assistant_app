@@ -651,32 +651,64 @@
    ============================================================ */
 .msg-error {
     display: flex;
-    align-items: flex-start;
+    flex-direction: column;
     gap: 8px;
     color: #f87171;
-    font-size: 13.5px;
-    flex-wrap: wrap;
-    padding: 2px 0;
+    font-size: 13px;
+    margin-top: 12px;
+    padding-top: 8px;
+    border-top: 1px solid rgba(248,113,113,0.3);
+    width: 100%;
 }
-.msg-error svg { flex-shrink: 0; margin-top: 2px; }
+
+.msg-error > div {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.msg-error svg { 
+    flex-shrink: 0; 
+    margin-top: 2px; 
+}
 
 .retry-btn {
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    margin-left: 2px;
     background: none;
     border: 1px solid rgba(248,113,113,0.4);
     color: #f87171;
     font-family: var(--font-sans);
     font-size: 12px;
-    padding: 3px 10px;
+    padding: 4px 12px;
     border-radius: 20px;
     cursor: pointer;
     transition: background var(--transition), border-color var(--transition);
     white-space: nowrap;
 }
 .retry-btn:hover {
+    background: rgba(248,113,113,0.12);
+    border-color: #f87171;
+}
+
+.delete-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    background: none;
+    border: 1px solid rgba(248,113,113,0.4);
+    color: #f87171;
+    font-family: var(--font-sans);
+    font-size: 12px;
+    padding: 4px 12px;
+    border-radius: 20px;
+    cursor: pointer;
+    transition: background var(--transition), border-color var(--transition);
+    white-space: nowrap;
+}
+.delete-btn:hover {
     background: rgba(248,113,113,0.12);
     border-color: #f87171;
 }
