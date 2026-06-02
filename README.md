@@ -25,12 +25,12 @@ An intelligent AI chatbot for Frappe/ERPNext that answers questions about your b
 # Navigate to your Frappe bench directory
 cd /path/to/your/frappe-bench
 
-# Get the app
-bench get-app ai_assistant https://github.com/yourusername/ai_assistant --branch main
+# Get the app using bench
+bench get-app ai_assistant https://github.com/fonkamariam/Frappe_Ai_Assistant_app.git --branch main
 
-# Or if cloning locally:
+# Or clone directly into apps folder
 cd apps
-git clone https://github.com/yourusername/ai_assistant
+git clone https://github.com/fonkamariam/Frappe_Ai_Assistant_app.git ai_assistant
 cd ..
 ```
 
