@@ -1,0 +1,35 @@
+{
+  "name": "ai-assistant-tests",
+  "version": "1.0.0",
+  "description": "Testing suite for Frappe AI Assistant",
+  "scripts": {
+    "test": "playwright test",
+    "test:unit": "pytest ai_assistant/tests/unit/ -v",
+    "test:integration": "pytest ai_assistant/tests/integration/ -v",
+    "test:backend": "pytest ai_assistant/tests/ -v",
+    "test:frontend": "playwright test",
+    "test:all": "npm run test:backend && npm run test:frontend",
+    "test:watch": "playwright test --watch",
+    "test:debug": "playwright test --debug",
+    "test:ui": "playwright test --ui",
+    "test:report": "playwright show-report",
+    "test:chromium": "playwright test --project=chromium",
+    "test:firefox": "playwright test --project=firefox",
+    "test:webkit": "playwright test --project=webkit",
+    "test:mobile": "playwright test --project='Mobile Chrome' --project='Mobile Safari'",
+    "test:update-snapshots": "playwright test --update-snapshots",
+    "test:headed": "playwright test --headed",
+    "playwright:install": "playwright install"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.40.0"
+  },
+  "keywords": [
+    "testing",
+    "playwright",
+    "e2e",
+    "frappe"
+  ],
+  "author": "AI Assistant Dev Team",
+  "license": "MIT"
+}

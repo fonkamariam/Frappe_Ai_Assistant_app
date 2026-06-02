@@ -1,0 +1,53 @@
+{"version":8,"type":"context-options","origin":"testRunner","browserName":"","playwrightVersion":"1.60.0","options":{},"platform":"linux","wallTime":1779941987144,"monotonicTime":58118.78,"sdkLanguage":"javascript"}
+{"type":"before","callId":"hook@1","stepId":"hook@1","startTime":58133.442,"class":"Test","method":"hook","title":"Before Hooks","params":{},"stack":[]}
+{"type":"before","callId":"fixture@27","stepId":"fixture@27","parentId":"hook@1","startTime":58143.867,"class":"Test","method":"fixture","title":"Fixture \"browser\"","params":{},"stack":[]}
+{"type":"before","callId":"pw:api@28","stepId":"pw:api@28","parentId":"fixture@27","startTime":58146.518,"class":"Test","method":"pw:api","title":"Launch browser","params":{"handleSIGINT":"false","tracesDir":"/home/fonka/project-frappe/workspace/frappe-bench/apps/ai_assistant/tests/playwright/test-results/.playwright-artifacts-21/traces","artifactsDir":"/home/fonka/project-frappe/workspace/frappe-bench/apps/ai_assistant/tests/playwright/test-results/.playwright-artifacts-21","headless":"true","ignoreDefaultArgs":"undefined","ignoreAllDefaultArgs":"false","env":"undefined","timeout":"180000"},"stack":[]}
+{"type":"after","callId":"pw:api@28","endTime":58233.166,"annotations":[]}
+{"type":"after","callId":"fixture@27","endTime":58233.583,"annotations":[]}
+{"type":"before","callId":"fixture@31","stepId":"fixture@31","parentId":"hook@1","startTime":58236.687,"class":"Test","method":"fixture","title":"Fixture \"context\"","params":{},"stack":[]}
+{"type":"before","callId":"pw:api@32","stepId":"pw:api@32","parentId":"fixture@31","startTime":58240.513,"class":"Test","method":"pw:api","title":"Create context","params":{"recordVideo":"Object","selectorEngines":"[]","testIdAttributeName":"data-testid","acceptDownloads":"accept","bypassCSP":"false","colorScheme":"light","deviceScaleFactor":"1","hasTouch":"false","ignoreHTTPSErrors":"false","isMobile":"false","javaScriptEnabled":"true","locale":"en-US","offline":"false","userAgent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.7778.96 Safari/537.36","viewport":"Object","baseURL":"http://localhost:8000","serviceWorkers":"allow","noDefaultViewport":"false","extraHTTPHeaders":"undefined","storageState":"undefined","reducedMotion":"undefined","forcedColors":"undefined","contrast":"undefined","clientCertificates":"undefined"},"stack":[]}
+{"type":"after","callId":"pw:api@32","endTime":58254.287,"annotations":[]}
+{"type":"after","callId":"fixture@31","endTime":58264.135,"annotations":[]}
+{"type":"before","callId":"fixture@33","stepId":"fixture@33","parentId":"hook@1","startTime":58265.332,"class":"Test","method":"fixture","title":"Fixture \"page\"","params":{},"stack":[]}
+{"type":"before","callId":"pw:api@34","stepId":"pw:api@34","parentId":"fixture@33","startTime":58267.976,"class":"Test","method":"pw:api","title":"Create page","params":{},"stack":[]}
+{"type":"after","callId":"pw:api@34","endTime":58311.254,"annotations":[]}
+{"type":"after","callId":"fixture@33","endTime":58311.574,"annotations":[]}
+{"type":"after","callId":"hook@1","endTime":58312.021,"annotations":[]}
+{"type":"before","callId":"pw:api@35","stepId":"pw:api@35","startTime":58316.626,"class":"Test","method":"pw:api","title":"Navigate to \"/desk/ai-chat\"","params":{"url":"/desk/ai-chat","waitUntil":"load","timeout":"0"},"stack":[{"file":"/home/fonka/project-frappe/workspace/frappe-bench/apps/ai_assistant/tests/playwright/tests/persistence.spec.ts","line":75,"column":16}]}
+{"type":"before","callId":"hook@36","stepId":"hook@36","startTime":59043.646,"class":"Test","method":"hook","title":"After Hooks","params":{},"stack":[]}
+{"type":"error","message":"Error: Channel closed","stack":[]}
+{"type":"after","callId":"pw:api@35","endTime":59062.768,"annotations":[]}
+{"type":"before","callId":"pw:api@37","stepId":"pw:api@37","parentId":"hook@36","startTime":59071.556,"class":"Test","method":"pw:api","title":"Wait for selector locator('.sidebar')","params":{"selector":".sidebar","timeout":"0"},"stack":[{"file":"/home/fonka/project-frappe/workspace/frappe-bench/apps/ai_assistant/tests/playwright/tests/persistence.spec.ts","line":76,"column":16}]}
+{"type":"before","callId":"fixture@38","stepId":"fixture@38","parentId":"hook@36","startTime":59247.931,"class":"Test","method":"fixture","title":"Fixture \"page\"","params":{},"stack":[]}
+{"type":"after","callId":"fixture@38","endTime":59248.647,"annotations":[]}
+{"type":"before","callId":"fixture@39","stepId":"fixture@39","parentId":"hook@36","startTime":59249.16,"class":"Test","method":"fixture","title":"Fixture \"context\"","params":{},"stack":[]}
+{"type":"before","callId":"pw:api@40","stepId":"pw:api@40","parentId":"fixture@39","startTime":59776.59,"class":"Test","method":"pw:api","title":"Close context","params":{"reason":"Test ended."},"stack":[]}
+{"type":"after","callId":"pw:api@37","endTime":59847.178,"annotations":[],"error":{"name":"","message":"Error: page.waitForSelector: Test ended.\nCall log:\n\u001b[2m  - waiting for locator('.sidebar') to be visible\u001b[22m\n","stack":"Error: page.waitForSelector: Test ended.\nCall log:\n\u001b[2m  - waiting for locator('.sidebar') to be visible\u001b[22m\n\n    at /home/fonka/project-frappe/workspace/frappe-bench/apps/ai_assistant/tests/playwright/tests/persistence.spec.ts:76:16"}}
+{"type":"error","message":"Error: page.waitForSelector: Test ended.\nCall log:\n\u001b[2m  - waiting for locator('.sidebar') to be visible\u001b[22m\n","stack":[{"file":"/home/fonka/project-frappe/workspace/frappe-bench/apps/ai_assistant/tests/playwright/tests/persistence.spec.ts","line":76,"column":16}]}
+{"type":"after","callId":"pw:api@40","endTime":59849.894,"annotations":[]}
+{"type":"after","callId":"fixture@39","endTime":59852.758,"attachments":[{"name":"video","contentType":"video/webm","path":"/home/fonka/project-frappe/workspace/frappe-bench/apps/ai_assistant/tests/playwright/test-results/persistence-AI-Chat---Pers-c8ac2-onversation-list-in-sidebar-chromium/video.webm"}],"annotations":[]}
+{"type":"before","callId":"attach@f8f526fca56777236c21d312b3d45d8d","stepId":"attach@f8f526fca56777236c21d312b3d45d8d","startTime":59858.229,"class":"Test","method":"test.attach","title":"Attach \"error-context\"","params":{},"stack":[]}
+{"type":"after","callId":"attach@f8f526fca56777236c21d312b3d45d8d","endTime":59858.414,"attachments":[{"name":"error-context","contentType":"text/markdown","path":"/home/fonka/project-frappe/workspace/frappe-bench/apps/ai_assistant/tests/playwright/test-results/persistence-AI-Chat---Pers-c8ac2-onversation-list-in-sidebar-chromium/error-context.md"}]}
+{"type":"before","callId":"fixture@49","stepId":"fixture@49","parentId":"hook@36","startTime":59860.472,"class":"Test","method":"fixture","title":"Fixture \"baseURL\"","params":{},"stack":[{"file":"project#chromium","line":1,"column":1}],"group":"configuration"}
+{"type":"after","callId":"fixture@49","endTime":59860.584,"annotations":[]}
+{"type":"before","callId":"fixture@50","stepId":"fixture@50","parentId":"hook@36","startTime":59860.999,"class":"Test","method":"fixture","title":"Fixture \"userAgent\"","params":{},"stack":[{"file":"project#chromium","line":1,"column":1}],"group":"configuration"}
+{"type":"after","callId":"fixture@50","endTime":59861.153,"annotations":[]}
+{"type":"before","callId":"fixture@52","stepId":"fixture@52","parentId":"hook@36","startTime":59865.438,"class":"Test","method":"fixture","title":"Fixture \"viewport\"","params":{},"stack":[{"file":"project#chromium","line":1,"column":1}],"group":"configuration"}
+{"type":"after","callId":"fixture@52","endTime":59865.573,"annotations":[]}
+{"type":"before","callId":"fixture@59","stepId":"fixture@59","parentId":"hook@36","startTime":59869.222,"class":"Test","method":"fixture","title":"Fixture \"isMobile\"","params":{},"stack":[{"file":"project#chromium","line":1,"column":1}],"group":"configuration"}
+{"type":"after","callId":"fixture@59","endTime":59869.334,"annotations":[]}
+{"type":"before","callId":"fixture@63","stepId":"fixture@63","parentId":"hook@36","startTime":59871.305,"class":"Test","method":"fixture","title":"Fixture \"hasTouch\"","params":{},"stack":[{"file":"project#chromium","line":1,"column":1}],"group":"configuration"}
+{"type":"after","callId":"fixture@63","endTime":59871.398,"annotations":[]}
+{"type":"before","callId":"fixture@65","stepId":"fixture@65","parentId":"hook@36","startTime":59872.289,"class":"Test","method":"fixture","title":"Fixture \"deviceScaleFactor\"","params":{},"stack":[{"file":"project#chromium","line":1,"column":1}],"group":"configuration"}
+{"type":"after","callId":"fixture@65","endTime":59872.387,"annotations":[]}
+{"type":"after","callId":"hook@36","endTime":59874.865,"attachments":[{"name":"screenshot","contentType":"image/png","path":"/home/fonka/project-frappe/workspace/frappe-bench/apps/ai_assistant/tests/playwright/test-results/persistence-AI-Chat---Pers-c8ac2-onversation-list-in-sidebar-chromium/test-failed-1.png"}],"annotations":[]}
+{"type":"before","callId":"hook@71","stepId":"hook@71","startTime":59875.301,"class":"Test","method":"hook","title":"Worker Cleanup","params":{},"stack":[]}
+{"type":"before","callId":"fixture@74","stepId":"fixture@74","parentId":"hook@71","startTime":59876.896,"class":"Test","method":"fixture","title":"Fixture \"video\"","params":{},"stack":[{"file":"project#chromium","line":1,"column":1}],"group":"configuration"}
+{"type":"after","callId":"fixture@74","endTime":59876.973,"annotations":[]}
+{"type":"before","callId":"fixture@75","stepId":"fixture@75","parentId":"hook@71","startTime":59877.46,"class":"Test","method":"fixture","title":"Fixture \"browser\"","params":{},"stack":[]}
+{"type":"after","callId":"fixture@75","endTime":59910.575,"annotations":[]}
+{"type":"before","callId":"fixture@79","stepId":"fixture@79","parentId":"hook@71","startTime":59911.581,"class":"Test","method":"fixture","title":"Fixture \"defaultBrowserType\"","params":{},"stack":[{"file":"project#chromium","line":1,"column":1}],"group":"configuration"}
+{"type":"after","callId":"fixture@79","endTime":59911.621,"annotations":[]}
+{"type":"before","callId":"fixture@80","stepId":"fixture@80","parentId":"hook@71","startTime":59911.795,"class":"Test","method":"fixture","title":"Fixture \"screenshot\"","params":{},"stack":[{"file":"project#chromium","line":1,"column":1}],"group":"configuration"}
+{"type":"after","callId":"fixture@80","endTime":59911.822,"annotations":[]}
+{"type":"after","callId":"hook@71","endTime":59912.829,"annotations":[]}

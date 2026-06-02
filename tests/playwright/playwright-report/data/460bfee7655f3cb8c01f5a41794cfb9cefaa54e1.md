@@ -1,0 +1,124 @@
+# Instructions
+
+- Following Playwright test failed.
+- Explain why, be concise, respect Playwright best practices.
+- Provide a snippet of code with the fix, if possible.
+
+# Test info
+
+- Name: page-load.spec.ts >> AI Chat - Page Load >> should load all main sections
+- Location: tests/page-load.spec.ts:19:7
+
+# Error details
+
+```
+TimeoutError: page.waitForSelector: Timeout 10000ms exceeded.
+Call log:
+  - waiting for locator('#chat-container') to be visible
+
+```
+
+# Page snapshot
+
+```yaml
+- main [ref=e4]:
+  - generic [ref=e7]:
+    - generic [ref=e8]:
+      - img [ref=e9]
+      - heading "Login to Frappe" [level=4] [ref=e10]
+    - form [ref=e12]:
+      - generic [ref=e13]:
+        - generic [ref=e14]:
+          - generic [ref=e15]:
+            - generic [ref=e16]: Email
+            - generic [ref=e17]:
+              - textbox "Email" [active] [ref=e18]:
+                - /placeholder: jane@example.com
+              - img [ref=e19]
+          - generic [ref=e21]:
+            - generic [ref=e22]: Password
+            - generic [ref=e23]:
+              - textbox "Password" [ref=e24]:
+                - /placeholder: •••••
+              - img [ref=e25]
+              - generic [ref=e27] [cursor=pointer]: Show
+          - paragraph [ref=e28]:
+            - link "Forgot Password?" [ref=e29] [cursor=pointer]:
+              - /url: "#forgot"
+        - button "Login" [ref=e31] [cursor=pointer]
+        - generic [ref=e32]:
+          - paragraph [ref=e33]: or
+          - link "Login with Email Link" [ref=e36] [cursor=pointer]:
+            - /url: "#login-with-email-link"
+```
+
+# Test source
+
+```ts
+  1  | import { test as base, expect } from '@playwright/test';
+  2  | 
+  3  | /**
+  4  |  * Chat page fixture - provides common setup for AI chat page tests
+  5  |  */
+  6  | export const test = base.extend({
+  7  |   /**
+  8  |    * Navigate to AI chat page and wait for it to load
+  9  |    */
+  10 |   chatPage: async ({ page }, use) => {
+  11 |     await page.goto('/desk/ai-chat');
+  12 |     
+  13 |     // Wait for main chat container to be visible
+> 14 |     await page.waitForSelector('#chat-container', { timeout: 10000 });
+     |                ^ TimeoutError: page.waitForSelector: Timeout 10000ms exceeded.
+  15 |     
+  16 |     // Wait for sidebar to render
+  17 |     await page.waitForSelector('.sidebar', { timeout: 5000 });
+  18 |     
+  19 |     await use(page);
+  20 |   },
+  21 | 
+  22 |   /**
+  23 |    * Mock localStorage with initial state
+  24 |    */
+  25 |   withLocalStorage: async ({ page }, use) => {
+  26 |     await page.addInitScript(() => {
+  27 |       // Pre-populate localStorage with test data if needed
+  28 |       const testConversations = [
+  29 |         {
+  30 |           id: 'test-conv-1',
+  31 |           title: 'Test Conversation 1',
+  32 |           messages: [
+  33 |             { role: 'user', content: 'Hello' },
+  34 |             { role: 'assistant', content: 'Hi there!' }
+  35 |           ],
+  36 |           created_at: new Date(Date.now() - 86400000).toISOString(),
+  37 |           last_updated: new Date(Date.now() - 86400000).toISOString()
+  38 |         }
+  39 |       ];
+  40 |       localStorage.setItem('ai_chat_conversations', JSON.stringify(testConversations));
+  41 |     });
+  42 |     
+  43 |     await use(page);
+  44 |   },
+  45 | 
+  46 |   /**
+  47 |    * Mock OpenRouter API responses
+  48 |    */
+  49 |   withMockedAPI: async ({ page }, use) => {
+  50 |     await page.route('**/api/method/ai_assistant*', route => {
+  51 |       const request = route.request();
+  52 |       
+  53 |       if (request.postDataJSON?.args?.message) {
+  54 |         route.abort('blockedbyclient');
+  55 |       } else {
+  56 |         route.continue();
+  57 |       }
+  58 |     });
+  59 |     
+  60 |     await use(page);
+  61 |   }
+  62 | });
+  63 | 
+  64 | export { expect };
+  65 | 
+```
