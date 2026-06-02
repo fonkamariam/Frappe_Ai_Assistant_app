@@ -1,37 +1,42 @@
 """
 ai_chat_api.py
 --------------
-Frappe whitelist API for the AI Assistant page.
+Frappe whitelist API for the AI Assistant with tool-calling agent.
 
 Endpoint:
     POST /api/method/ai_assistant.ai_chat_api.send_message
 
-Reads the OpenRouter API key from site_config.json:
-    bench --site <site> set-config openrouter_api_key "<key>"
+Configuration via site_config.json:
+    ai_provider: "ollama" or "openrouter" (default: "ollama")
+    
+If using OpenRouter:
+    openrouter_api_key: Your API key
+    openrouter_model: Model name (e.g., "deepseek/deepseek-r1:free")
 
-Model: deepseek/deepseek-r1:free (configurable via site_config)
+If using Ollama (local):
+    No API key needed. Model defaults to "qwen3.5:4b"
+
+ARCHITECTURE:
+    This module uses a tool-calling agent that can execute tools (e.g., generate_profit_loss_report)
+    to retrieve real data from ERPNext. The agent loop handles tool detection, execution, and result
+    integration back into the conversation.
 """
 
 import json
 import time
 import frappe
 import requests
+from .agent import Agent
+from .tools import get_registry
 
 # ---------------------------------------------------------------------------
 # Configuration constants
 # ---------------------------------------------------------------------------
-OPENROUTER_API_URL   = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL        =  frappe.conf.get("openrouter_model", "deepseek/deepseek-r1:free")
+DEFAULT_MODEL        = "qwen3.5:0.8b"
 DEFAULT_MAX_TOKENS   = 4096
-REQUEST_TIMEOUT      = 120          # seconds — R1 can be slow on first token
+REQUEST_TIMEOUT      = 360          # seconds
 MAX_HISTORY_MESSAGES = 20           # cap history to avoid huge payloads
 RETRY_WAIT_SECONDS   = 2            # used in error messages
-
-SYSTEM_PROMPT = """You are a helpful, knowledgeable AI assistant embedded in an ERPNext/Frappe environment.
-You provide clear, accurate, and concise answers.
-When writing code, always specify the language in fenced code blocks.
-When reasoning through a problem, think step by step.
-Be professional but approachable."""
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +52,7 @@ class ApiError:
     MALFORMED        = "MALFORMED_RESPONSE"
     UPSTREAM         = "UPSTREAM_ERROR"
     VALIDATION       = "VALIDATION_ERROR"
+    TOOL_ERROR       = "TOOL_ERROR"
 
 
 def _error_response(code, user_message, status_code=400):
@@ -61,22 +67,29 @@ def _error_response(code, user_message, status_code=400):
     }
 
 
-def _success_response(content, reasoning_content=None, model=None, usage=None):
+def _success_response(content, reasoning_content=None, model=None, usage=None, tool_calls=None, data_source=None):
     """Build a structured success payload."""
     return {
-        "ok":               True,
-        "content":          content,
-        "reasoning_content": reasoning_content or "",
-        "model":            model or DEFAULT_MODEL,
-        "usage":            usage or {},
+        "ok":                   True,
+        "content":              content,
+        "reasoning_content":    reasoning_content or "",
+        "model":                model or DEFAULT_MODEL,
+        "usage":                usage or {},
+        "tool_calls":           tool_calls or [],
+        "data_source":          data_source or "Model"
     }
 
 
 # ---------------------------------------------------------------------------
 # Config helpers
 # ---------------------------------------------------------------------------
+def _get_provider():
+    """Get the AI provider from site_config.json. Default: ollama"""
+    return frappe.conf.get("ai_provider", "ollama").lower()
+
+
 def _get_api_key():
-    """Read openrouter_api_key from site_config.json."""
+    """Read openrouter_api_key from site_config.json (only needed for OpenRouter)."""
     key = frappe.conf.get("openrouter_api_key", "")
     if not key or not key.strip():
         return None
@@ -84,33 +97,32 @@ def _get_api_key():
 
 
 def _get_model():
-    """Allow overriding model via site_config."""
-    return frappe.conf.get("openrouter_model", DEFAULT_MODEL)
+    """Get the model name from site_config, based on provider."""
+    provider = _get_provider()
+    if provider == "openrouter":
+        return frappe.conf.get("openrouter_model", "deepseek/deepseek-r1:free")
+    else:
+        # Ollama
+        return frappe.conf.get("ai_model", DEFAULT_MODEL)
 
 
 def _get_max_tokens():
     """Allow overriding max_tokens via site_config."""
-    return int(frappe.conf.get("openrouter_max_tokens", DEFAULT_MAX_TOKENS))
+    return int(frappe.conf.get("ai_max_tokens", DEFAULT_MAX_TOKENS))
 
 
 # ---------------------------------------------------------------------------
-# Message builder
+# Message builder (for non-tool conversations, backward compatibility)
 # ---------------------------------------------------------------------------
 def _build_messages(history, latest_message):
     """
-    Assemble the messages array for the OpenRouter API call.
-
+    Assemble the messages array for the OpenRouter API call (legacy, non-tool mode).
+    
     Layout:
-        [system] + [history (capped)] + [latest user message]
-
-    history items are expected as:
-        { "role": "user"|"assistant", "content": "..." }
-
-    Attachments are text-only references (images are Frappe file URLs;
-    we don't send binary data to the LLM in this version).
+        [history (capped)] + [latest user message]
     """
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-
+    messages = []
+    
     # Sanitise and cap history
     valid_roles = {"user", "assistant"}
     clean_history = []
@@ -119,218 +131,14 @@ def _build_messages(history, latest_message):
         content = item.get("content", "")
         if role in valid_roles and isinstance(content, str):
             clean_history.append({"role": role, "content": content.strip()})
-
-    # Keep only the last N messages to stay within context limits
+    
+    # Keep only the last N messages
     if len(clean_history) > MAX_HISTORY_MESSAGES:
         clean_history = clean_history[-MAX_HISTORY_MESSAGES:]
-
+    
     messages.extend(clean_history)
     messages.append({"role": "user", "content": latest_message.strip()})
     return messages
-
-
-# ---------------------------------------------------------------------------
-# OpenRouter call (server-side streaming consumed, full payload returned)
-# ---------------------------------------------------------------------------
-def _call_openrouter(api_key, messages, model, max_tokens):
-    """
-    Call OpenRouter with stream=True.
-    Consume all SSE chunks server-side and return the assembled response.
-
-    Returns a dict:
-        {
-            "content":          str,
-            "reasoning_content": str,
-            "model":            str,
-            "usage":            dict,
-        }
-
-    Raises RuntimeError with a structured error dict on failure.
-    """
-    headers = {
-        "Authorization":  f"Bearer {api_key}",
-        "Content-Type":   "application/json",
-        "HTTP-Referer":   frappe.utils.get_url(),       # required by OpenRouter
-        "X-Title":        "Frappe AI Assistant",
-    }
-
-    payload = {
-        "model":      model,
-        "messages":   messages,
-        "max_tokens": max_tokens,
-        "stream":     True,
-    }
-
-    try:
-        response = requests.post(
-            OPENROUTER_API_URL,
-            headers=headers,
-            json=payload,
-            stream=True,
-            timeout=REQUEST_TIMEOUT,
-        )
-    except requests.exceptions.Timeout:
-        frappe.log_error(
-            title="AI Assistant: OpenRouter Timeout",
-            message=f"Request timed out after {REQUEST_TIMEOUT}s"
-        )
-        raise RuntimeError(json.dumps({
-            "code":    ApiError.TIMEOUT,
-            "message": f"The AI is taking too long to respond. Please try again."
-        }))
-    except requests.exceptions.ConnectionError as e:
-        frappe.log_error(
-            title="AI Assistant: Network Error",
-            message=str(e)
-        )
-        raise RuntimeError(json.dumps({
-            "code":    ApiError.NETWORK,
-            "message": "Could not reach the AI service. Check your internet connection."
-        }))
-
-    # Handle HTTP-level errors
-    if response.status_code == 401:
-        frappe.log_error(
-            title="AI Assistant: Invalid API Key",
-            message=f"OpenRouter returned 401. Check openrouter_api_key in site_config."
-        )
-        raise RuntimeError(json.dumps({
-            "code":    ApiError.INVALID_KEY,
-            "message": "The AI API key is invalid or expired. Please contact your administrator."
-        }))
-
-    if response.status_code == 429:
-        frappe.log_error(
-            title="AI Assistant: Rate Limited",
-            message="OpenRouter returned 429."
-        )
-        raise RuntimeError(json.dumps({
-            "code":    ApiError.RATE_LIMITED,
-            "message": f"The AI service is currently rate-limited. Please wait {RETRY_WAIT_SECONDS}s and try again."
-        }))
-
-    if response.status_code >= 500:
-        frappe.log_error(
-            title="AI Assistant: Upstream Error",
-            message=f"OpenRouter returned {response.status_code}: {response.text[:500]}"
-        )
-        raise RuntimeError(json.dumps({
-            "code":    ApiError.UPSTREAM,
-            "message": "The AI service is experiencing issues. Please try again shortly."
-        }))
-
-    if response.status_code != 200:
-        frappe.log_error(
-            title="AI Assistant: Unexpected HTTP Status",
-            message=f"Status {response.status_code}: {response.text[:500]}"
-        )
-        raise RuntimeError(json.dumps({
-            "code":    ApiError.UPSTREAM,
-            "message": f"Unexpected response from AI service (HTTP {response.status_code})."
-        }))
-
-    # Consume SSE stream
-    content_parts          = []
-    reasoning_parts        = []
-    finish_reason          = None
-    usage                  = {}
-    actual_model           = model
-
-    try:
-        for raw_line in response.iter_lines():
-            if not raw_line:
-                continue
-
-            line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else raw_line
-
-            if not line.startswith("data:"):
-                continue
-
-            data_str = line[5:].strip()
-
-            if data_str == "[DONE]":
-                break
-
-            try:
-                chunk = json.loads(data_str)
-            except json.JSONDecodeError:
-                continue
-
-            # Extract model from first chunk
-            if "model" in chunk:
-                actual_model = chunk["model"]
-
-            # Usage info (may appear in last chunk)
-            if "usage" in chunk and chunk["usage"]:
-                usage = chunk["usage"]
-
-            choices = chunk.get("choices", [])
-            if not choices:
-                continue
-
-            delta = choices[0].get("delta", {})
-            finish_reason = choices[0].get("finish_reason") or finish_reason
-
-            # Regular content
-            chunk_content = delta.get("content") or ""
-            if chunk_content:
-                content_parts.append(chunk_content)
-
-            # DeepSeek reasoning_content (present in R1 models)
-            chunk_reasoning = delta.get("reasoning_content") or ""
-            if chunk_reasoning:
-                reasoning_parts.append(chunk_reasoning)
-
-    except Exception as e:
-        frappe.log_error(
-            title="AI Assistant: Stream Parsing Error",
-            message=str(e)
-        )
-        raise RuntimeError(json.dumps({
-            "code":    ApiError.MALFORMED,
-            "message": "Received an unexpected response format from the AI service."
-        }))
-
-    content          = "".join(content_parts).strip()
-    reasoning_content = "".join(reasoning_parts).strip()
-
-    if not content and not reasoning_content:
-        frappe.log_error(
-            title="AI Assistant: Empty Response",
-            message=f"Model: {actual_model}, finish_reason: {finish_reason}"
-        )
-        raise RuntimeError(json.dumps({
-            "code":    ApiError.EMPTY_RESPONSE,
-            "message": "The AI returned an empty response. Please try rephrasing your message."
-        }))
-
-    return {
-        "content":           content,
-        "reasoning_content": reasoning_content,
-        "model":             actual_model,
-        "usage":             usage,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Mock reasoning generator (for UI testing)
-# ---------------------------------------------------------------------------
-def _generate_mock_reasoning(message):
-    """
-    Generate mock reasoning content for UI testing.
-    Simulates how DeepSeek R1 would reason through a problem.
-    """
-    reasoning_samples = {
-        "default": "This is a mock reasoning process. because this model doesn't support real reasoning content. In a real scenario, the reasoning_content would include the AI's step-by-step thought process, considerations, and how it arrived at the final answer. This helps users understand the AI's logic and builds trust in its responses."
-    }
-    
-    # Find the most relevant sample
-    msg_lower = message.lower()
-    for key, reasoning in reasoning_samples.items():
-        if key in msg_lower:
-            return reasoning
-    
-    return reasoning_samples["default"]
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +159,8 @@ def send_message(message, history=None):
             "content":          "...",
             "reasoning_content": "...",
             "model":            "...",
-            "usage":            {...}
+            "usage":            {...},
+            "tool_calls":       [...]
         }
 
     Or on error:
@@ -380,47 +189,48 @@ def send_message(message, history=None):
             elif isinstance(history, list):
                 parsed_history = history
 
-        # ---- API key check ----
-        api_key = _get_api_key()
-        if not api_key:
-            frappe.log_error(
-                title="AI Assistant: Missing API Key",
-                message="openrouter_api_key is not set in site_config.json"
-            )
-            return _error_response(
-                ApiError.MISSING_KEY,
-                "AI service is not configured. Please ask your administrator to set the API key.",
-                status_code=503
-            )
+        # ---- API key check (only for OpenRouter) ----
+        provider = _get_provider()
+        if provider == "openrouter":
+            api_key = _get_api_key()
+            if not api_key:
+                frappe.log_error(
+                    title="AI Assistant: Missing API Key",
+                    message="openrouter_api_key is not set in site_config.json"
+                )
+                return _error_response(
+                    ApiError.MISSING_KEY,
+                    "AI service is not configured. Please ask your administrator to set the API key.",
+                    status_code=503
+                )
+        else:
+            # Ollama doesn't need API key
+            api_key = None
 
-        # ---- Build messages ----
+        # ---- Initialize agent and run ----
         try:
             model      = _get_model()
             max_tokens = _get_max_tokens()
-            messages   = _build_messages(parsed_history, message)
+            
+            tools_registry = get_registry()
+            agent = Agent(model, api_key, tools_registry, provider=provider)
+            
+            result = agent.run(message.strip(), parsed_history, max_tokens)
         except Exception as e:
-            frappe.log_error(title="AI Chat API: Config/Message Build Error", message=str(e))
-            return _error_response(ApiError.UPSTREAM, f"Error: {str(e)}", status_code=502)
+            frappe.log_error(title="AI Chat API: Agent Error", message=str(e))
+            return _error_response(ApiError.UPSTREAM, f"Agent error: {str(e)}", status_code=502)
 
-        # ---- Call OpenRouter ----
-        try:
-            result = _call_openrouter(api_key, messages, model, max_tokens)
-        except RuntimeError as e:
-            try:
-                err = json.loads(str(e))
-                return _error_response(err["code"], err["message"], status_code=502)
-            except Exception:
-                return _error_response(ApiError.UPSTREAM, "An unexpected error occurred.", status_code=502)
-
-        # ---- Add mock reasoning_content for UI testing (if not present) ----
-        if not result.get("reasoning_content"):
-            result["reasoning_content"] = _generate_mock_reasoning(message)
+        # ---- Check for errors in agent result ----
+        if not result.get("ok"):
+            return _error_response(result.get("error", ApiError.UPSTREAM), result.get("message", "Unknown error"), status_code=502)
 
         return _success_response(
-            content=result["content"],
-            reasoning_content=result["reasoning_content"],
-            model=result["model"],
-            usage=result["usage"],
+            content=result.get("content", ""),
+            reasoning_content=result.get("reasoning_content", ""),
+            model=result.get("model", model),
+            usage=result.get("usage", {}),
+            tool_calls=result.get("tool_calls", []),
+            data_source=result.get("data_source", "Model")
         )
     except Exception as e:
         frappe.log_error(

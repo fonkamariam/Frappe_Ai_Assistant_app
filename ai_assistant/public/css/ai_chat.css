@@ -957,3 +957,17 @@
     background: var(--surface-hover);
     color: var(--text-primary);
 }
+
+/* Data source badge for messages using tools */
+.data-source-badge {
+    display: inline-block;
+    margin-top: 8px;
+    padding: 4px 8px;
+    background: var(--surface-2);
+    border: 1px solid var(--border-subtle);
+    border-radius: 12px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    font-weight: 500;
+    white-space: nowrap;
+}

@@ -413,12 +413,46 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
             result = result.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<em>$1</em>');
             result = result.replace(/_(.+?)_/g, '<em>$1</em>');
 
-            // 4. Lists and paragraphs
+            // 4. Headings and lists and paragraphs
             const lines  = result.split('\n');
             const output = [];
             let inOl = false, inUl = false;
 
             for (const line of lines) {
+                // Handle headings
+                const h1Match = line.match(/^#\s+(.+)/);
+                if (h1Match) {
+                    if (inOl) { output.push('</ol>'); inOl = false; }
+                    if (inUl) { output.push('</ul>'); inUl = false; }
+                    output.push(`<h1>${h1Match[1]}</h1>`);
+                    continue;
+                }
+
+                const h2Match = line.match(/^##\s+(.+)/);
+                if (h2Match) {
+                    if (inOl) { output.push('</ol>'); inOl = false; }
+                    if (inUl) { output.push('</ul>'); inUl = false; }
+                    output.push(`<h2>${h2Match[1]}</h2>`);
+                    continue;
+                }
+
+                const h3Match = line.match(/^###\s+(.+)/);
+                if (h3Match) {
+                    if (inOl) { output.push('</ol>'); inOl = false; }
+                    if (inUl) { output.push('</ul>'); inUl = false; }
+                    output.push(`<h3>${h3Match[1]}</h3>`);
+                    continue;
+                }
+
+                const h4Match = line.match(/^####\s+(.+)/);
+                if (h4Match) {
+                    if (inOl) { output.push('</ol>'); inOl = false; }
+                    if (inUl) { output.push('</ul>'); inUl = false; }
+                    output.push(`<h4>${h4Match[1]}</h4>`);
+                    continue;
+                }
+
+                // Handle ordered lists
                 const olMatch = line.match(/^(\d+)\.\s+(.+)/);
                 if (olMatch) {
                     if (!inOl) { output.push('<ol>'); inOl = true; }
@@ -426,6 +460,7 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
                     continue;
                 } else if (inOl) { output.push('</ol>'); inOl = false; }
 
+                // Handle unordered lists
                 const ulMatch = line.match(/^[-*]\s+(.+)/);
                 if (ulMatch) {
                     if (!inUl) { output.push('<ul>'); inUl = true; }
@@ -575,7 +610,7 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
          * Append a completed message bubble to the chat.
          */
         function appendMessage(role, content, opts = {}) {
-            const { attachments = [], reasoning_content = '', messageId = null, error = null, messageIndex = null, convId = null } = opts;
+            const { attachments = [], reasoning_content = '', messageId = null, error = null, messageIndex = null, convId = null, data_source = null } = opts;
             const chatBox    = $('#chat-messages');
             const isUser     = role === 'user';
             const authorLabel= isUser ? 'You' : 'AI Assistant';
@@ -584,6 +619,12 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
                 : `<div class="msg-avatar avatar-bot">✦</div>`;
 
             let bubbleContent = '';
+
+            // Data source badge (only for assistant messages with tools)
+            let dataSourceBadge = '';
+            if (!isUser && data_source && data_source !== 'Model') {
+                dataSourceBadge = `<div class="data-source-badge" title="Data fetched from ${data_source}">📊 ${data_source}</div>`;
+            }
 
             // Reasoning block (DeepSeek R1)
             if (!isUser && reasoning_content) {
@@ -629,6 +670,7 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
                         <span class="msg-author">${authorLabel}</span>
                         <div class="bubble">
                             ${bubbleContent}
+                            ${dataSourceBadge}
                             ${role === 'assistant' ? `<button class="copy-msg-btn" title="Copy message" style="display:none;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>` : ''}
                         </div>
                     </div>
@@ -729,6 +771,17 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
                     const contentEl = $(`#${msgId}_content`);
                     contentEl.html(renderMarkdown(fullContent));
                     _bindBubbleEvents($('#chat-messages'));
+                },
+
+                /**
+                 * Set data source badge after finalise.
+                 */
+                setDataSource(dataSource) {
+                    if (dataSource && dataSource !== 'Model') {
+                        const bubble = $(`#${msgId} .bubble`);
+                        const badge = `<div class="data-source-badge" title="Data fetched from ${dataSource}">📊 ${dataSource}</div>`;
+                        bubble.append(badge);
+                    }
                 },
 
                 /**
@@ -1044,7 +1097,8 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
                     reasoning_content: m.reasoning_content || '',
                     error:             m.error || null,  // Restore error state
                     messageIndex:      idx,
-                    convId:            id
+                    convId:            id,
+                    data_source:       m.data_source || null  // Restore data source
                 });
             });
         } else {
@@ -1179,11 +1233,15 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
             userMsg.error = null;
             ConversationStorage.save(conv);
 
+            // Update the streaming message with data source
+            streamHandle.setDataSource(result.data_source);
+
             // Persist assistant message
             const assistantMsg = {
                 role: 'assistant',
                 content: result.content,
                 reasoning_content: result.reasoning_content || undefined,
+                data_source: result.data_source || undefined
             };
             ConversationStorage.addMessage(convId, assistantMsg);
 
@@ -1378,8 +1436,12 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
                 role:              'assistant',
                 content:           result.content,
                 reasoning_content: result.reasoning_content || undefined,
+                data_source:       result.data_source || undefined
             };
             ConversationStorage.addMessage(currentConversationId, assistantMsg);
+
+            // Update the streaming message with data source
+            streamHandle.setDataSource(result.data_source);
 
             // Refresh sidebar to update last_updated ordering
             refreshSidebar();
