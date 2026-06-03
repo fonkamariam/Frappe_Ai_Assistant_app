@@ -1567,7 +1567,7 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
                     label: 'OpenAI API Key',
                     default: settings.openai_api_key || '',
                     reqd: 0,
-                    max_length: 1024,
+                    length: 1024,
                     description: 'Stored in this browser only for the demo.',
                 },
                 {
