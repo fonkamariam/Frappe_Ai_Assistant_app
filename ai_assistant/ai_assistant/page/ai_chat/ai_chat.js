@@ -197,63 +197,515 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
 
 
     // =========================================================================
+    // FRONTEND SETTINGS
+    // Responsible for: browser-local demo config for OpenAI and MCP access.
+    // =========================================================================
+    const FrontendSettings = (() => {
+        const STORAGE_KEY = 'ai_chat_frontend_settings_v1';
+        const DEFAULTS = {
+            openai_api_key: '',
+            openai_model: 'gpt-5.5',
+            openai_base_url: 'https://api.openai.com/v1',
+            mcp_server_label: 'erpnext',
+            mcp_server_description: 'ERPNext MCP server for business data and actions.',
+            mcp_server_url: new URL(
+                '/api/method/frappe_assistant_core.api.fac_endpoint.handle_mcp',
+                window.location.origin
+            ).toString(),
+        };
+
+        function _load() {
+            try {
+                const raw = localStorage.getItem(STORAGE_KEY);
+                if (!raw) return { ...DEFAULTS };
+                const parsed = JSON.parse(raw);
+                return { ...DEFAULTS, ...(parsed || {}) };
+            } catch {
+                return { ...DEFAULTS };
+            }
+        }
+
+        function get() {
+            return _load();
+        }
+
+        function save(values = {}) {
+            const next = { ..._load(), ...(values || {}) };
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+            return next;
+        }
+
+        return { get, save, DEFAULTS };
+    })();
+
+
+    // =========================================================================
+    // FRONTEND OAUTH SERVICE
+    // Responsible for: browser-only OAuth discovery, PKCE, token exchange,
+    // refresh, and connection state for the ERPNext MCP endpoint.
+    // =========================================================================
+    const OAuthService = (() => {
+        const TOKEN_STORAGE_KEY = 'ai_chat_mcp_oauth_tokens_v1';
+        const PENDING_STORAGE_KEY = 'ai_chat_mcp_oauth_pending_v1';
+        const EXPIRY_SKEW_MS = 60 * 1000;
+
+        function _loadFrom(storage, key, fallback = null) {
+            try {
+                const raw = storage.getItem(key);
+                if (!raw) return fallback;
+                return JSON.parse(raw);
+            } catch {
+                return fallback;
+            }
+        }
+
+        function _saveTo(storage, key, value) {
+            storage.setItem(key, JSON.stringify(value));
+        }
+
+        function _removeFrom(storage, key) {
+            storage.removeItem(key);
+        }
+
+        function _base64Url(bytes) {
+            const binary = Array.from(bytes, byte => String.fromCharCode(byte)).join('');
+            return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+        }
+
+        function _randomString(byteLength = 32) {
+            const bytes = new Uint8Array(byteLength);
+            crypto.getRandomValues(bytes);
+            return _base64Url(bytes);
+        }
+
+        async function _sha256Base64Url(text) {
+            const encoded = new TextEncoder().encode(text);
+            const digest = await crypto.subtle.digest('SHA-256', encoded);
+            return _base64Url(new Uint8Array(digest));
+        }
+
+        function _getRedirectUri() {
+            const url = new URL(window.location.href);
+            url.search = '';
+            return url.toString();
+        }
+
+        function _cleanupCallbackUrl() {
+            const url = new URL(window.location.href);
+            url.search = '';
+            window.history.replaceState({}, document.title, url.toString());
+        }
+
+        function _getProtectedResourceMetadataUrl(resourceUrl) {
+            const resource = new URL(resourceUrl);
+            return `${resource.origin}/.well-known/oauth-protected-resource${resource.pathname}`;
+        }
+
+        async function _fetchJson(url, options = {}) {
+            const response = await fetch(url, {
+                ...options,
+                headers: {
+                    Accept: 'application/json',
+                    ...(options.headers || {}),
+                },
+            });
+
+            const text = await response.text();
+            let data = {};
+
+            try {
+                data = text ? JSON.parse(text) : {};
+            } catch {
+                data = { raw: text };
+            }
+
+            if (!response.ok) {
+                throw new Error(
+                    data.error_description
+                    || data.message
+                    || data.error
+                    || `Request failed (${response.status})`
+                );
+            }
+
+            return data;
+        }
+
+        async function discover(resourceUrl) {
+            const resourceMetadata = await _fetchJson(
+                _getProtectedResourceMetadataUrl(resourceUrl),
+                {
+                    headers: {
+                        'MCP-Protocol-Version': '2025-11-25',
+                    },
+                }
+            );
+
+            const authorizationServer = (resourceMetadata.authorization_servers || [])[0]
+                || resourceMetadata.resource
+                || new URL(resourceUrl).origin;
+
+            const authMetadata = await _fetchJson(
+                new URL('/.well-known/oauth-authorization-server', authorizationServer).toString()
+            );
+
+            return { resourceMetadata, authMetadata, authorizationServer };
+        }
+
+        async function registerClient(authMetadata, redirectUri) {
+            if (!authMetadata.registration_endpoint) {
+                throw new Error('The authorization server does not expose dynamic client registration.');
+            }
+
+            return _fetchJson(authMetadata.registration_endpoint, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    client_name: 'Frappe AI Assistant',
+                    client_uri: window.location.origin,
+                    redirect_uris: [redirectUri],
+                    grant_types: ['authorization_code', 'refresh_token'],
+                    response_types: ['code'],
+                    token_endpoint_auth_method: 'none',
+                }),
+            });
+        }
+
+        function getStoredTokens() {
+            return _loadFrom(localStorage, TOKEN_STORAGE_KEY, null);
+        }
+
+        function clearTokens() {
+            _removeFrom(localStorage, TOKEN_STORAGE_KEY);
+        }
+
+        function getStatus() {
+            const tokens = getStoredTokens();
+            if (!tokens || !tokens.access_token) {
+                return {
+                    connected: false,
+                    className: 'disconnected',
+                    label: 'MCP disconnected',
+                };
+            }
+
+            const remainingMs = (tokens.expires_at || 0) - Date.now();
+            if (remainingMs <= 0) {
+                return {
+                    connected: false,
+                    className: 'disconnected',
+                    label: 'MCP token expired',
+                };
+            }
+
+            if (remainingMs <= 5 * 60 * 1000) {
+                return {
+                    connected: true,
+                    className: 'expiring',
+                    label: 'MCP expiring soon',
+                };
+            }
+
+            return {
+                connected: true,
+                className: 'connected',
+                label: 'MCP connected',
+            };
+        }
+
+        async function beginAuthorization(settings) {
+            if (!settings.mcp_server_url) {
+                throw new Error('Set the MCP server URL before connecting.');
+            }
+
+            const redirectUri = _getRedirectUri();
+            const discovery = await discover(settings.mcp_server_url);
+            const client = await registerClient(discovery.authMetadata, redirectUri);
+            const state = _randomString(18);
+            const codeVerifier = _randomString(48);
+            const codeChallenge = await _sha256Base64Url(codeVerifier);
+
+            _saveTo(sessionStorage, PENDING_STORAGE_KEY, {
+                state,
+                code_verifier: codeVerifier,
+                redirect_uri: redirectUri,
+                resource: settings.mcp_server_url,
+                token_endpoint: discovery.authMetadata.token_endpoint,
+                authorization_endpoint: discovery.authMetadata.authorization_endpoint,
+                client_id: client.client_id,
+                client_secret: client.client_secret || '',
+            });
+
+            const authUrl = new URL(discovery.authMetadata.authorization_endpoint);
+            authUrl.searchParams.set('response_type', 'code');
+            authUrl.searchParams.set('client_id', client.client_id);
+            authUrl.searchParams.set('redirect_uri', redirectUri);
+            authUrl.searchParams.set('code_challenge', codeChallenge);
+            authUrl.searchParams.set('code_challenge_method', 'S256');
+            authUrl.searchParams.set('state', state);
+            authUrl.searchParams.set('resource', settings.mcp_server_url);
+
+            window.location.assign(authUrl.toString());
+        }
+
+        async function completeAuthorizationIfPresent() {
+            const url = new URL(window.location.href);
+            const code = url.searchParams.get('code');
+            const state = url.searchParams.get('state');
+            const error = url.searchParams.get('error');
+
+            if (!code && !error) {
+                return { handled: false };
+            }
+
+            if (error) {
+                const description = url.searchParams.get('error_description');
+                _cleanupCallbackUrl();
+                throw new Error(description || `OAuth error: ${error}`);
+            }
+
+            const pending = _loadFrom(sessionStorage, PENDING_STORAGE_KEY, null);
+            if (!pending || pending.state !== state) {
+                _cleanupCallbackUrl();
+                throw new Error('OAuth callback state mismatch. Please reconnect the MCP server.');
+            }
+
+            const form = new URLSearchParams();
+            form.set('grant_type', 'authorization_code');
+            form.set('code', code);
+            form.set('redirect_uri', pending.redirect_uri);
+            form.set('client_id', pending.client_id);
+            if (pending.client_secret) {
+                form.set('client_secret', pending.client_secret);
+            }
+            form.set('code_verifier', pending.code_verifier);
+            form.set('resource', pending.resource);
+
+            const tokenData = await _fetchJson(pending.token_endpoint, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: form.toString(),
+            });
+
+            const now = Date.now();
+            _saveTo(localStorage, TOKEN_STORAGE_KEY, {
+                access_token: tokenData.access_token,
+                refresh_token: tokenData.refresh_token || '',
+                token_type: tokenData.token_type || 'Bearer',
+                scope: tokenData.scope || '',
+                obtained_at: now,
+                expires_in: Number(tokenData.expires_in || 3600),
+                expires_at: now + (Number(tokenData.expires_in || 3600) * 1000),
+                resource: pending.resource,
+                token_endpoint: pending.token_endpoint,
+                client_id: pending.client_id,
+                client_secret: pending.client_secret || '',
+            });
+
+            _removeFrom(sessionStorage, PENDING_STORAGE_KEY);
+            _cleanupCallbackUrl();
+
+            return { handled: true };
+        }
+
+        async function refreshAccessTokenIfNeeded() {
+            const tokens = getStoredTokens();
+            if (!tokens || !tokens.access_token) {
+                throw new Error('Connect the ERPNext MCP server before sending a message.');
+            }
+
+            if ((tokens.expires_at || 0) - Date.now() > EXPIRY_SKEW_MS) {
+                return tokens;
+            }
+
+            if (!tokens.refresh_token) {
+                clearTokens();
+                throw new Error('The MCP access token expired. Please reconnect.');
+            }
+
+            const form = new URLSearchParams();
+            form.set('grant_type', 'refresh_token');
+            form.set('refresh_token', tokens.refresh_token);
+            form.set('client_id', tokens.client_id);
+            if (tokens.client_secret) {
+                form.set('client_secret', tokens.client_secret);
+            }
+            if (tokens.resource) {
+                form.set('resource', tokens.resource);
+            }
+
+            const tokenData = await _fetchJson(tokens.token_endpoint, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: form.toString(),
+            });
+
+            const now = Date.now();
+            const next = {
+                ...tokens,
+                access_token: tokenData.access_token,
+                refresh_token: tokenData.refresh_token || tokens.refresh_token,
+                token_type: tokenData.token_type || tokens.token_type || 'Bearer',
+                scope: tokenData.scope || tokens.scope || '',
+                obtained_at: now,
+                expires_in: Number(tokenData.expires_in || 3600),
+                expires_at: now + (Number(tokenData.expires_in || 3600) * 1000),
+            };
+
+            _saveTo(localStorage, TOKEN_STORAGE_KEY, next);
+            return next;
+        }
+
+        async function getAccessToken() {
+            const tokens = await refreshAccessTokenIfNeeded();
+            return tokens.access_token;
+        }
+
+        return {
+            beginAuthorization,
+            clearTokens,
+            completeAuthorizationIfPresent,
+            getAccessToken,
+            getStatus,
+            getStoredTokens,
+            refreshAccessTokenIfNeeded,
+        };
+    })();
+
+
+    // =========================================================================
     // LAYER 2: ChatApiService
-    // Responsible for: HTTP calls, streaming simulation, error normalisation,
-    //                  retry logic, abort control.
+    // Responsible for: direct browser calls to OpenAI Responses API using the
+    // stored OpenAI key and ERPNext MCP OAuth bearer token.
     // =========================================================================
     const ChatApiService = (() => {
-        // Active AbortController for the current request
         let _abortController = null;
 
         const ERROR_MESSAGES = {
-            MISSING_API_KEY:   'The AI service is not configured. Please contact your administrator.',
-            INVALID_API_KEY:   'The AI API key is invalid. Please contact your administrator.',
-            RATE_LIMITED:      'The AI service is rate-limited. Please wait a moment and try again.',
-            REQUEST_TIMEOUT:   'The request timed out. The AI may be busy — please try again.',
-            NETWORK_ERROR:     'Network error. Please check your connection and try again.',
-            EMPTY_RESPONSE:    'The AI returned an empty response. Please rephrase and try again.',
-            MALFORMED_RESPONSE:'Received an unexpected response from the AI service.',
-            UPSTREAM_ERROR:    'The AI service is experiencing issues. Please try again shortly.',
-            VALIDATION_ERROR:  'Invalid request. Please check your message and try again.',
-            UNKNOWN:           'An unexpected error occurred. Please try again.'
+            MISSING_OPENAI_KEY: 'Add your OpenAI API key in Settings before sending a message.',
+            MCP_NOT_CONNECTED: 'Connect the ERPNext MCP server before sending a message.',
+            INVALID_OPENAI_KEY: 'The OpenAI API key was rejected. Update it in Settings and try again.',
+            RATE_LIMITED: 'OpenAI rate limited this request. Please wait a moment and try again.',
+            REQUEST_TIMEOUT: 'The request timed out. Please try again.',
+            NETWORK_ERROR: 'Network error. Please check your connection and try again.',
+            EMPTY_RESPONSE: 'The model returned an empty response. Please try rephrasing.',
+            MALFORMED_RESPONSE: 'Received an unexpected response from OpenAI.',
+            UPSTREAM_ERROR: 'OpenAI returned an error for this request.',
+            UNKNOWN: 'An unexpected error occurred. Please try again.',
         };
 
-        /**
-         * Send a message to the backend and return a structured result.
-         *
-         * @param {string}   message  - latest user text
-         * @param {Array}    history  - prior messages [{role, content}, ...]
-         * @returns {Promise<{ content, reasoning_content, model, usage }>}
-         * @throws  {Error} with a user-friendly .message
-         */
+        const SYSTEM_PROMPT = [
+            'You are a helpful AI assistant embedded inside ERPNext.',
+            'When a user asks about ERPNext data or wants to perform ERPNext actions, use the connected MCP server instead of guessing.',
+            'If the MCP server does not provide enough information, explain that clearly rather than inventing data.',
+            'For general non-ERP questions, answer normally and concisely.',
+        ].join(' ');
+
+        function _getResponsesUrl(baseUrl) {
+            return `${(baseUrl || FrontendSettings.DEFAULTS.openai_base_url).replace(/\/+$/, '')}/responses`;
+        }
+
+        function _buildInput(history, latestMessage) {
+            const input = [];
+            for (const item of history || []) {
+                if (!item || !['user', 'assistant'].includes(item.role)) continue;
+                if (typeof item.content !== 'string' || !item.content.trim()) continue;
+                input.push({
+                    role: item.role,
+                    content: item.content.trim(),
+                });
+            }
+
+            input.push({
+                role: 'user',
+                content: latestMessage.trim(),
+            });
+
+            return input;
+        }
+
+        function _extractOutputText(payload) {
+            if (typeof payload.output_text === 'string' && payload.output_text.trim()) {
+                return payload.output_text.trim();
+            }
+
+            const chunks = [];
+            for (const item of payload.output || []) {
+                if (item.type !== 'message' || !Array.isArray(item.content)) continue;
+                for (const part of item.content) {
+                    if (part.type === 'output_text' && part.text) {
+                        chunks.push(part.text);
+                    }
+                }
+            }
+
+            return chunks.join('\n').trim();
+        }
+
+        function _didUseMcp(payload) {
+            try {
+                return /"type":"[^"]*mcp/i.test(JSON.stringify(payload.output || []));
+            } catch {
+                return false;
+            }
+        }
+
         async function sendMessage(message, history = []) {
-            // Abort any in-progress request
             cancel();
             _abortController = new AbortController();
 
-            // Build history stripped to role+content only (no UI-only fields)
-            const cleanHistory = history.map(m => ({
-                role:    m.role,
-                content: m.content || ''
-            }));
+            const settings = FrontendSettings.get();
+            if (!settings.openai_api_key || !settings.openai_api_key.trim()) {
+                throw Object.assign(
+                    new Error(ERROR_MESSAGES.MISSING_OPENAI_KEY),
+                    { code: 'MISSING_OPENAI_KEY' }
+                );
+            }
+
+            let mcpAccessToken;
+            try {
+                mcpAccessToken = await OAuthService.getAccessToken();
+            } catch (err) {
+                throw Object.assign(
+                    new Error(err.message || ERROR_MESSAGES.MCP_NOT_CONNECTED),
+                    { code: 'MCP_NOT_CONNECTED' }
+                );
+            }
+
+            const payload = {
+                model: settings.openai_model || FrontendSettings.DEFAULTS.openai_model,
+                instructions: SYSTEM_PROMPT,
+                input: _buildInput(history, message),
+                tools: [
+                    {
+                        type: 'mcp',
+                        server_label: settings.mcp_server_label || FrontendSettings.DEFAULTS.mcp_server_label,
+                        server_description: settings.mcp_server_description || FrontendSettings.DEFAULTS.mcp_server_description,
+                        server_url: settings.mcp_server_url || FrontendSettings.DEFAULTS.mcp_server_url,
+                        authorization: mcpAccessToken,
+                        require_approval: 'never',
+                    },
+                ],
+                store: false,
+            };
 
             let response;
             try {
-                response = await fetch(
-                    '/api/method/ai_assistant.ai_chat_api.send_message',
-                    {
-                        method:  'POST',
-                        headers: {
-                            'Content-Type':       'application/json',
-                            'X-Frappe-CSRF-Token': frappe.csrf_token,
-                        },
-                        body:    JSON.stringify({
-                            message,
-                            history: JSON.stringify(cleanHistory)
-                        }),
-                        signal:  _abortController.signal,
-                    }
-                );
+                response = await fetch(_getResponsesUrl(settings.openai_base_url), {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        Authorization: `Bearer ${settings.openai_api_key.trim()}`,
+                    },
+                    body: JSON.stringify(payload),
+                    signal: _abortController.signal,
+                });
             } catch (err) {
                 if (err.name === 'AbortError') {
                     throw Object.assign(new Error('Request cancelled.'), { code: 'CANCELLED' });
@@ -276,22 +728,33 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
                 );
             }
 
-            // Frappe wraps responses in { message: ... }
-            const payload = data.message || data;
+            if (!response.ok) {
+                let code = 'UNKNOWN';
+                if (response.status === 401) code = 'INVALID_OPENAI_KEY';
+                else if (response.status === 429) code = 'RATE_LIMITED';
+                else if (response.status >= 500) code = 'UPSTREAM_ERROR';
 
-            if (!payload.ok) {
-                const code = payload.error || 'UNKNOWN';
-                const userMsg = payload.message
+                const messageText = data?.error?.message
                     || ERROR_MESSAGES[code]
                     || ERROR_MESSAGES.UNKNOWN;
-                throw Object.assign(new Error(userMsg), { code });
+
+                throw Object.assign(new Error(messageText), { code });
+            }
+
+            const content = _extractOutputText(data);
+            if (!content) {
+                throw Object.assign(
+                    new Error(ERROR_MESSAGES.EMPTY_RESPONSE),
+                    { code: 'EMPTY_RESPONSE' }
+                );
             }
 
             return {
-                content:           payload.content           || '',
-                reasoning_content: payload.reasoning_content || '',
-                model:             payload.model             || '',
-                usage:             payload.usage             || {},
+                content,
+                reasoning_content: '',
+                model: data.model || settings.openai_model || '',
+                usage: data.usage || {},
+                data_source: _didUseMcp(data) ? 'ERPNext' : 'Model',
             };
         }
 
@@ -1070,6 +1533,152 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
         ChatUI.renderConversationList(convs, currentConversationId, sidebarCallbacks);
     }
 
+    function updateUserIdentity() {
+        const fullName = frappe.session?.user_fullname || frappe.session?.user || 'User';
+        const firstInitial = (fullName || 'U').trim().charAt(0).toUpperCase() || 'U';
+        $('.user-name').text(fullName);
+        $('.user-avatar').text(firstInitial);
+    }
+
+    function updateConnectionBadge() {
+        const status = OAuthService.getStatus();
+        const badge = $('#mcp-connection-badge');
+        badge
+            .removeClass('connected expiring disconnected')
+            .addClass(status.className)
+            .text(status.label);
+
+        $('.user-plan').text(status.label);
+        $('#connect-mcp-btn').attr(
+            'title',
+            status.connected ? 'Reconnect ERPNext MCP' : 'Connect ERPNext MCP'
+        );
+    }
+
+    function openSettingsDialog() {
+        const settings = FrontendSettings.get();
+
+        const dialog = new frappe.ui.Dialog({
+            title: 'AI Assistant Settings',
+            fields: [
+                {
+                    fieldtype: 'Password',
+                    fieldname: 'openai_api_key',
+                    label: 'OpenAI API Key',
+                    default: settings.openai_api_key || '',
+                    reqd: 0,
+                    description: 'Stored in this browser only for the demo.',
+                },
+                {
+                    fieldtype: 'Data',
+                    fieldname: 'openai_model',
+                    label: 'OpenAI Model',
+                    default: settings.openai_model || FrontendSettings.DEFAULTS.openai_model,
+                },
+                {
+                    fieldtype: 'Data',
+                    fieldname: 'mcp_server_url',
+                    label: 'MCP Server URL',
+                    default: settings.mcp_server_url || FrontendSettings.DEFAULTS.mcp_server_url,
+                    reqd: 1,
+                },
+                {
+                    fieldtype: 'Data',
+                    fieldname: 'mcp_server_label',
+                    label: 'MCP Server Label',
+                    default: settings.mcp_server_label || FrontendSettings.DEFAULTS.mcp_server_label,
+                },
+                {
+                    fieldtype: 'Small Text',
+                    fieldname: 'mcp_server_description',
+                    label: 'MCP Server Description',
+                    default: settings.mcp_server_description || FrontendSettings.DEFAULTS.mcp_server_description,
+                },
+                {
+                    fieldtype: 'HTML',
+                    fieldname: 'connection_status',
+                },
+            ],
+            primary_action_label: 'Save',
+            primary_action(values) {
+                FrontendSettings.save(values);
+                updateConnectionBadge();
+                dialog.hide();
+                frappe.show_alert({ message: 'Settings saved in this browser.', indicator: 'green' }, 3);
+            },
+        });
+
+        function renderDialogStatus() {
+            const status = OAuthService.getStatus();
+            const wrapper = dialog.fields_dict.connection_status.$wrapper;
+            const tone = status.className === 'connected'
+                ? '#4ade80'
+                : status.className === 'expiring'
+                    ? '#fbbf24'
+                    : '#f87171';
+
+            wrapper.html(`
+                <div style="margin-top: 8px; padding: 12px; border: 1px solid rgba(148, 163, 184, 0.2); border-radius: 10px; background: rgba(15, 23, 42, 0.03);">
+                    <div style="font-weight: 600; margin-bottom: 6px; color: ${tone};">${status.label}</div>
+                    <div style="font-size: 12px; color: var(--text-muted, #94a3b8); line-height: 1.5;">
+                        The ERPNext OAuth access token is stored locally in this browser.
+                        OpenAI receives that access token on each request through the MCP tool config.
+                    </div>
+                    <button type="button" class="btn btn-default btn-xs" id="clear-mcp-token-btn" style="margin-top: 10px;">
+                        Clear MCP Token
+                    </button>
+                </div>
+            `);
+
+            wrapper.find('#clear-mcp-token-btn').on('click', () => {
+                OAuthService.clearTokens();
+                updateConnectionBadge();
+                renderDialogStatus();
+                frappe.show_alert({ message: 'Stored MCP token cleared.', indicator: 'orange' }, 3);
+            });
+        }
+
+        dialog.show();
+        renderDialogStatus();
+        if (typeof dialog.set_secondary_action === 'function') {
+            dialog.set_secondary_action(
+                OAuthService.getStatus().connected ? 'Reconnect MCP' : 'Connect MCP',
+                async () => {
+                    const values = dialog.get_values();
+                    if (!values) return;
+                    FrontendSettings.save(values);
+                    updateConnectionBadge();
+                    await connectMcp(true);
+                }
+            );
+        }
+    }
+
+    async function connectMcp(showAlerts = true) {
+        try {
+            const settings = FrontendSettings.get();
+            if (!settings.mcp_server_url) {
+                throw new Error('Add the MCP server URL in Settings before connecting.');
+            }
+
+            if (showAlerts) {
+                frappe.show_alert({
+                    message: 'Redirecting to ERPNext to approve MCP access...',
+                    indicator: 'blue',
+                }, 5);
+            }
+
+            await OAuthService.beginAuthorization(settings);
+            return true;
+        } catch (err) {
+            frappe.show_alert({
+                message: err.message || 'Failed to start MCP authentication.',
+                indicator: 'red',
+            }, 6);
+            return false;
+        }
+    }
+
     // ---- Conversation management ----
      function loadConversation(id) {
         if (id === currentConversationId) return;
@@ -1604,6 +2213,20 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
         ChatUI.applyTheme(isDarkMode);
     });
 
+    // Settings / connection
+    $('.settings-btn').on('click', openSettingsDialog);
+    $('#connect-mcp-btn').on('click', async () => {
+        if (OAuthService.getStatus().connected) {
+            openSettingsDialog();
+            return;
+        }
+
+        const connected = await connectMcp(true);
+        if (!connected) {
+            openSettingsDialog();
+        }
+    });
+
     // Close dropdowns on outside click
     $(document).on('click', e => {
         if (!$(e.target).closest('.dropdown-menu, .more-btn').length) {
@@ -1626,44 +2249,23 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
     // =========================================================================
     // INIT
     // =========================================================================
+    updateUserIdentity();
+
+    try {
+        const oauthResult = await OAuthService.completeAuthorizationIfPresent();
+        if (oauthResult.handled) {
+            frappe.show_alert({ message: 'ERPNext MCP connected successfully.', indicator: 'green' }, 4);
+        }
+    } catch (err) {
+        frappe.show_alert({
+            message: err.message || 'Failed to complete ERPNext MCP authentication.',
+            indicator: 'red',
+        }, 6);
+    }
+
     ChatUI.applyTheme(isDarkMode);
     ChatUI.setSendState(false); // ensure stop-btn is hidden
-
-    // Load conversations from localStorage (seeding dummy data if empty)
-    let storedConvs = ConversationStorage.getAll();
-    if (storedConvs.length === 0) {
-        // Seed with representative dummy conversations so the sidebar is not empty
-        const seedData = [
-            {
-                title: 'How to build a REST API with Node.js',
-                messages: [
-                    { role: 'user', content: 'How do I build a REST API with Node.js?' },
-                    { role: 'assistant', content: 'Building a REST API with Node.js is straightforward. Here\'s a quick example using **Express**:\n\n```javascript\nconst express = require(\'express\');\nconst app = express();\n\napp.use(express.json());\n\napp.get(\'/api/users\', (req, res) => {\n  res.json({ users: [] });\n});\n\napp.listen(3000, () => console.log(\'Server running on port 3000\'));\n```\n\nThis sets up a basic GET endpoint.' }
-                ],
-                created_at:   new Date(Date.now() - 1000 * 60 * 5).toISOString(),
-                last_updated: new Date(Date.now() - 1000 * 60 * 5).toISOString(),
-            },
-            {
-                title: 'Best practices for React performance',
-                messages: [
-                    { role: 'user', content: 'What are best practices for React performance?' },
-                    { role: 'assistant', content: 'Key React performance practices:\n\n1. Use `React.memo` to prevent unnecessary re-renders\n2. Leverage `useMemo` and `useCallback`\n3. Code-split with `React.lazy`\n4. Virtualise long lists with `react-window`' }
-                ],
-                created_at:   new Date(Date.now() - 86400000).toISOString(),
-                last_updated: new Date(Date.now() - 86400000).toISOString(),
-            },
-            {
-                title: 'Docker container orchestration guide',
-                messages: [
-                    { role: 'user', content: 'Guide me on Docker container orchestration' },
-                    { role: 'assistant', content: 'Docker container orchestration with **Kubernetes** or **Docker Swarm** lets you manage container clusters at scale, handling scaling, networking, and self-healing automatically.' }
-                ],
-                created_at:   new Date(Date.now() - 3 * 86400000).toISOString(),
-                last_updated: new Date(Date.now() - 3 * 86400000).toISOString(),
-            }
-        ];
-        seedData.forEach(s => ConversationStorage.create(s));
-    }
+    updateConnectionBadge();
 
     ChatUI.showEmptyState();
     refreshSidebar();
