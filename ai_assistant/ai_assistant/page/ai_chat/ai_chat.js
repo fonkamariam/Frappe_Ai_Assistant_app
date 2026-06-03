@@ -1567,6 +1567,7 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
                     label: 'OpenAI API Key',
                     default: settings.openai_api_key || '',
                     reqd: 0,
+                    max_length: 1024,
                     description: 'Stored in this browser only for the demo.',
                 },
                 {
@@ -1581,6 +1582,7 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
                     label: 'MCP Server URL',
                     default: settings.mcp_server_url || FrontendSettings.DEFAULTS.mcp_server_url,
                     reqd: 1,
+                    max_length: 1024,
                 },
                 {
                     fieldtype: 'Data',

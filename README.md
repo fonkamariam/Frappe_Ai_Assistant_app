@@ -1,11 +1,15 @@
 # AI Assistant for Frappe/ERPNext
 
-An intelligent AI chatbot for Frappe/ERPNext that answers questions about your business data with **verified data source tracking**. When the AI uses your actual database, a "📊 ERPNext" badge confirms the data is real, not hallucinated.
+An intelligent AI chatbot for Frappe/ERPNext that answers questions about your
+business data with **verified data source tracking**. When the AI uses your
+actual database, a "📊 ERPNext" badge confirms the data is real, not
+hallucinated.
 
 ## 🌟 What It Does
 
 - 🤖 **Ask Questions** - Natural language queries about your ERPNext data
-- 📊 **Get Verified Answers** - See "📊 ERPNext" badge proving data came from your database
+- 📊 **Get Verified Answers** - See "📊 ERPNext" badge proving data came from
+  your database
 - 📈 **Financial Reports** - Generate P&L reports and financial analysis
 - 💬 **Chat History** - Persistent conversations with data source tracking
 - 🔌 **Smart Tool Use** - AI automatically uses tools when it needs real data
@@ -26,7 +30,7 @@ An intelligent AI chatbot for Frappe/ERPNext that answers questions about your b
 cd /path/to/your/frappe-bench
 
 # Get the app using bench
-bench get-app ai_assistant https://github.com/fonkamariam/Frappe_Ai_Assistant_app.git --branch main
+bench get-app ai_assistant https://github.com/fonkamariam/Frappe_Ai_Assistant_app.git --branch update
 
 # Or clone directly into apps folder
 cd apps
@@ -49,12 +53,14 @@ bench pip install -r apps/ai_assistant/requirements.txt
 Choose one option below:
 
 **OpenRouter (Production):**
+
 ```bash
 bench --site your-site set-config openrouter_api_key "sk-or-v1-YOUR_KEY"
 bench --site your-site set-config ai_provider "openrouter"
 ```
 
 **Ollama (Local Development):**
+
 ```bash
 bench --site your-site set-config ai_provider "ollama"
 bench --site your-site set-config ai_model "qwen:4b"
@@ -69,6 +75,7 @@ Navigate to `/app/ai-chat` and start asking questions.
 Edit your site's `site_config.json`:
 
 **For OpenRouter:**
+
 ```json
 {
   "ai_provider": "openrouter",
@@ -77,6 +84,7 @@ Edit your site's `site_config.json`:
 ```
 
 **For Ollama:**
+
 ```json
 {
   "ai_provider": "ollama",
@@ -91,7 +99,8 @@ Edit your site's `site_config.json`:
 
 **User:** "Generate a profit and loss report for 2023"
 
-**AI Response:** 
+**AI Response:**
+
 ```
 Based on your GL Entry data:
 
@@ -117,11 +126,13 @@ Key Accounts:
 
 **User:** "What was my cash position in March?"
 
-**AI Response:** Queries your accounting data and provides verified cash flow analysis
+**AI Response:** Queries your accounting data and provides verified cash flow
+analysis
 
 ## 🏗️ How It Works
 
 When you ask a question:
+
 1. Your message is sent to the AI model
 2. AI decides if it needs to query your ERPNext data
 3. If yes, it executes a **tool** (like P&L report generator)
@@ -132,18 +143,21 @@ When you ask a question:
 ## 🐛 Troubleshooting
 
 **"Access denied for database user"**
+
 ```bash
 # Recreate database user
 bench rebuild-search-index --site your-site
 ```
 
 **"OpenRouter API key not set"**
+
 ```bash
 bench --site your-site set-config openrouter_api_key "your-key"
 bench clear-cache
 ```
 
 **"Ollama connection refused"**
+
 ```bash
 # Ensure Ollama is running
 ollama serve
@@ -156,6 +170,7 @@ bench --site your-site set-config ollama_base_url "http://host.docker.internal:1
 ```
 
 **"No badge on responses"**
+
 - This means the AI didn't use any tools
 - It happens when the AI decides it has enough context to answer
 - Is normal behavior
@@ -163,6 +178,7 @@ bench --site your-site set-config ollama_base_url "http://host.docker.internal:1
 ## 📚 Learn More
 
 Documentation files included:
+
 - `AGENT_ARCHITECTURE.md` - How the AI agent works
 - `DATA_VERIFICATION_GUIDE.md` - Data verification details
 - `DOCKER_QUICK_START.md` - Docker deployment
