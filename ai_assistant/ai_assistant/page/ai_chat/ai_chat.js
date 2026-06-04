@@ -361,6 +361,7 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
+                    'X-Frappe-CSRF-Token': frappe.csrf_token,
                 },
                 body: JSON.stringify({
                     client_name: 'Frappe AI Assistant',
