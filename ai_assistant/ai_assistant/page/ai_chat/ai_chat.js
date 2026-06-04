@@ -198,14 +198,18 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
 
     // =========================================================================
     // FRONTEND SETTINGS
-    // Responsible for: browser-local demo config for OpenAI and MCP access.
+    // Responsible for: browser-local demo config for LLM providers and MCP access.
     // =========================================================================
     const FrontendSettings = (() => {
         const STORAGE_KEY = 'ai_chat_frontend_settings_v1';
         const DEFAULTS = {
+            llm_provider: 'openai',
             openai_api_key: '',
             openai_model: 'gpt-5.5',
             openai_base_url: 'https://api.openai.com/v1',
+            google_api_key: '',
+            google_model: 'gemini-2.5-flash',
+            google_base_url: 'https://generativelanguage.googleapis.com/v1beta',
             mcp_server_label: 'erpnext',
             mcp_server_description: 'ERPNext MCP server for business data and actions.',
             mcp_server_url: new URL(
@@ -596,22 +600,24 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
 
     // =========================================================================
     // LAYER 2: ChatApiService
-    // Responsible for: direct browser calls to OpenAI Responses API using the
-    // stored OpenAI key and ERPNext MCP OAuth bearer token.
+    // Responsible for: direct browser calls to the selected LLM provider using
+    // the stored provider key and ERPNext MCP OAuth bearer token.
     // =========================================================================
     const ChatApiService = (() => {
         let _abortController = null;
 
         const ERROR_MESSAGES = {
             MISSING_OPENAI_KEY: 'Add your OpenAI API key in Settings before sending a message.',
+            MISSING_GOOGLE_KEY: 'Add your Google AI API key in Settings before sending a message.',
             MCP_NOT_CONNECTED: 'Connect the ERPNext MCP server before sending a message.',
             INVALID_OPENAI_KEY: 'The OpenAI API key was rejected. Update it in Settings and try again.',
-            RATE_LIMITED: 'OpenAI rate limited this request. Please wait a moment and try again.',
+            INVALID_GOOGLE_KEY: 'The Google AI API key was rejected. Update it in Settings and try again.',
+            RATE_LIMITED: 'The model provider rate limited this request. Please wait a moment and try again.',
             REQUEST_TIMEOUT: 'The request timed out. Please try again.',
             NETWORK_ERROR: 'Network error. Please check your connection and try again.',
             EMPTY_RESPONSE: 'The model returned an empty response. Please try rephrasing.',
-            MALFORMED_RESPONSE: 'Received an unexpected response from OpenAI.',
-            UPSTREAM_ERROR: 'OpenAI returned an error for this request.',
+            MALFORMED_RESPONSE: 'Received an unexpected response from the model provider.',
+            UPSTREAM_ERROR: 'The model provider returned an error for this request.',
             UNKNOWN: 'An unexpected error occurred. Please try again.',
         };
 
@@ -624,6 +630,10 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
 
         function _getResponsesUrl(baseUrl) {
             return `${(baseUrl || FrontendSettings.DEFAULTS.openai_base_url).replace(/\/+$/, '')}/responses`;
+        }
+
+        function _getGoogleInteractionsUrl(baseUrl) {
+            return `${(baseUrl || FrontendSettings.DEFAULTS.google_base_url).replace(/\/+$/, '')}/interactions`;
         }
 
         function _buildInput(history, latestMessage) {
@@ -671,25 +681,47 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
             }
         }
 
-        async function sendMessage(message, history = []) {
-            cancel();
-            _abortController = new AbortController();
+        function _extractGoogleOutputText(payload) {
+            if (typeof payload.output_text === 'string' && payload.output_text.trim()) {
+                return payload.output_text.trim();
+            }
 
-            const settings = FrontendSettings.get();
+            const chunks = [];
+            for (const step of payload.steps || []) {
+                if (step.type !== 'model_output' || !Array.isArray(step.content)) continue;
+                for (const part of step.content) {
+                    if (part.type === 'text' && part.text) {
+                        chunks.push(part.text);
+                    }
+                }
+            }
+            return chunks.join('\n').trim();
+        }
+
+        function _didGoogleUseMcp(payload) {
+            return (payload.steps || []).some(step =>
+                step.type === 'mcp_server_tool_call' || step.type === 'mcp_server_tool_result'
+            );
+        }
+
+        function _getProvider(settings) {
+            return (settings.llm_provider || FrontendSettings.DEFAULTS.llm_provider || 'openai').toLowerCase();
+        }
+
+        function _sanitizeMcpServerName(label) {
+            const base = String(label || 'erpnext')
+                .trim()
+                .toLowerCase()
+                .replace(/[^a-z0-9_]+/g, '_')
+                .replace(/^_+|_+$/g, '');
+            return base || 'erpnext';
+        }
+
+        async function _sendOpenAIMessage(settings, message, history, mcpAccessToken) {
             if (!settings.openai_api_key || !settings.openai_api_key.trim()) {
                 throw Object.assign(
                     new Error(ERROR_MESSAGES.MISSING_OPENAI_KEY),
                     { code: 'MISSING_OPENAI_KEY' }
-                );
-            }
-
-            let mcpAccessToken;
-            try {
-                mcpAccessToken = await OAuthService.getAccessToken();
-            } catch (err) {
-                throw Object.assign(
-                    new Error(err.message || ERROR_MESSAGES.MCP_NOT_CONNECTED),
-                    { code: 'MCP_NOT_CONNECTED' }
                 );
             }
 
@@ -729,8 +761,6 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
                     new Error(ERROR_MESSAGES.NETWORK_ERROR),
                     { code: 'NETWORK_ERROR' }
                 );
-            } finally {
-                _abortController = null;
             }
 
             let data;
@@ -771,6 +801,126 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
                 usage: data.usage || {},
                 data_source: _didUseMcp(data) ? 'ERPNext' : 'Model',
             };
+        }
+
+        async function _sendGoogleMessage(settings, message, history, mcpAccessToken) {
+            if (!settings.google_api_key || !settings.google_api_key.trim()) {
+                throw Object.assign(
+                    new Error(ERROR_MESSAGES.MISSING_GOOGLE_KEY),
+                    { code: 'MISSING_GOOGLE_KEY' }
+                );
+            }
+
+            const payload = {
+                model: settings.google_model || FrontendSettings.DEFAULTS.google_model,
+                input: _buildInput(history, message).map(item => ({
+                    role: item.role,
+                    content: [{ type: 'text', text: item.content }],
+                })),
+                store: false,
+                system_instruction: SYSTEM_PROMPT,
+                tools: [
+                    {
+                        type: 'mcp_server',
+                        name: _sanitizeMcpServerName(
+                            settings.mcp_server_label || FrontendSettings.DEFAULTS.mcp_server_label
+                        ),
+                        url: settings.mcp_server_url || FrontendSettings.DEFAULTS.mcp_server_url,
+                        headers: {
+                            Authorization: `Bearer ${mcpAccessToken}`,
+                        },
+                    },
+                ],
+            };
+
+            let response;
+            try {
+                response = await fetch(_getGoogleInteractionsUrl(settings.google_base_url), {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'x-goog-api-key': settings.google_api_key.trim(),
+                    },
+                    body: JSON.stringify(payload),
+                    signal: _abortController.signal,
+                });
+            } catch (err) {
+                if (err.name === 'AbortError') {
+                    throw Object.assign(new Error('Request cancelled.'), { code: 'CANCELLED' });
+                }
+                throw Object.assign(
+                    new Error(ERROR_MESSAGES.NETWORK_ERROR),
+                    { code: 'NETWORK_ERROR' }
+                );
+            }
+
+            let data;
+            try {
+                data = await response.json();
+            } catch {
+                throw Object.assign(
+                    new Error(ERROR_MESSAGES.MALFORMED_RESPONSE),
+                    { code: 'MALFORMED_RESPONSE' }
+                );
+            }
+
+            if (!response.ok) {
+                let code = 'UNKNOWN';
+                if (response.status === 400) code = 'UPSTREAM_ERROR';
+                else if (response.status === 401 || response.status === 403) code = 'INVALID_GOOGLE_KEY';
+                else if (response.status === 429) code = 'RATE_LIMITED';
+                else if (response.status >= 500) code = 'UPSTREAM_ERROR';
+
+                const messageText = data?.error?.message
+                    || data?.message
+                    || ERROR_MESSAGES[code]
+                    || ERROR_MESSAGES.UNKNOWN;
+
+                throw Object.assign(new Error(messageText), { code });
+            }
+
+            const content = _extractGoogleOutputText(data);
+            if (!content) {
+                throw Object.assign(
+                    new Error(ERROR_MESSAGES.EMPTY_RESPONSE),
+                    { code: 'EMPTY_RESPONSE' }
+                );
+            }
+
+            return {
+                content,
+                reasoning_content: '',
+                model: data.model || settings.google_model || '',
+                usage: data.usage || {},
+                data_source: _didGoogleUseMcp(data) ? 'ERPNext' : 'Model',
+            };
+        }
+
+        async function sendMessage(message, history = []) {
+            cancel();
+            _abortController = new AbortController();
+
+            const settings = FrontendSettings.get();
+            const provider = _getProvider(settings);
+
+            let mcpAccessToken;
+            try {
+                mcpAccessToken = await OAuthService.getAccessToken();
+            } catch (err) {
+                throw Object.assign(
+                    new Error(err.message || ERROR_MESSAGES.MCP_NOT_CONNECTED),
+                    { code: 'MCP_NOT_CONNECTED' }
+                );
+            }
+
+            try {
+                if (provider === 'google') {
+                    return await _sendGoogleMessage(settings, message, history, mcpAccessToken);
+                }
+                return await _sendOpenAIMessage(settings, message, history, mcpAccessToken);
+            } finally {
+                _abortController = null;
+            }
         }
 
         /**
@@ -1577,6 +1727,14 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
             title: 'AI Assistant Settings',
             fields: [
                 {
+                    fieldtype: 'Select',
+                    fieldname: 'llm_provider',
+                    label: 'LLM Provider',
+                    default: settings.llm_provider || FrontendSettings.DEFAULTS.llm_provider,
+                    options: ['openai', 'google'],
+                    reqd: 1,
+                },
+                {
                     fieldtype: 'Password',
                     fieldname: 'openai_api_key',
                     label: 'OpenAI API Key',
@@ -1590,6 +1748,21 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
                     fieldname: 'openai_model',
                     label: 'OpenAI Model',
                     default: settings.openai_model || FrontendSettings.DEFAULTS.openai_model,
+                },
+                {
+                    fieldtype: 'Password',
+                    fieldname: 'google_api_key',
+                    label: 'Google AI API Key',
+                    default: settings.google_api_key || '',
+                    reqd: 0,
+                    length: 1024,
+                    description: 'Stored in this browser only for the demo.',
+                },
+                {
+                    fieldtype: 'Data',
+                    fieldname: 'google_model',
+                    label: 'Google AI Model',
+                    default: settings.google_model || FrontendSettings.DEFAULTS.google_model,
                 },
                 {
                     fieldtype: 'Data',
@@ -1639,7 +1812,7 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
                     <div style="font-weight: 600; margin-bottom: 6px; color: ${tone};">${status.label}</div>
                     <div style="font-size: 12px; color: var(--text-muted, #94a3b8); line-height: 1.5;">
                         The ERPNext OAuth access token is stored locally in this browser.
-                        OpenAI receives that access token on each request through the MCP tool config.
+                        Your selected model provider receives that access token on each request through the MCP tool config.
                     </div>
                     <button type="button" class="btn btn-default btn-xs" id="clear-mcp-token-btn" style="margin-top: 10px;">
                         Clear MCP Token
@@ -1655,7 +1828,25 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
             });
         }
 
-        dialog.show();
+            dialog.show();
+
+            const providerField = dialog.get_field('llm_provider');
+            const openAiKeyField = dialog.get_field('openai_api_key').$wrapper;
+            const openAiModelField = dialog.get_field('openai_model').$wrapper;
+            const googleKeyField = dialog.get_field('google_api_key').$wrapper;
+            const googleModelField = dialog.get_field('google_model').$wrapper;
+
+            function refreshProviderFields() {
+                const provider = (dialog.get_value('llm_provider') || 'openai').toLowerCase();
+                const isGoogle = provider === 'google';
+                openAiKeyField.toggle(!isGoogle);
+                openAiModelField.toggle(!isGoogle);
+                googleKeyField.toggle(isGoogle);
+                googleModelField.toggle(isGoogle);
+            }
+
+            providerField.$input.on('change', refreshProviderFields);
+            refreshProviderFields();
         renderDialogStatus();
         if (typeof dialog.set_secondary_action === 'function') {
             dialog.set_secondary_action(
