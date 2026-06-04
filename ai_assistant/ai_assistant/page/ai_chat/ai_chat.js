@@ -302,12 +302,27 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
         }
 
         async function _fetchJson(url, options = {}) {
+            const resolvedUrl = new URL(url, window.location.origin);
+            const method = (options.method || 'GET').toUpperCase();
+            const isSameOrigin = resolvedUrl.origin === window.location.origin;
+            const isWriteRequest = !['GET', 'HEAD', 'OPTIONS'].includes(method);
+            const headers = {
+                Accept: 'application/json',
+                ...(options.headers || {}),
+            };
+
+            if (isSameOrigin && isWriteRequest && frappe?.csrf_token && !headers['X-Frappe-CSRF-Token']) {
+                headers['X-Frappe-CSRF-Token'] = frappe.csrf_token;
+            }
+
+            if (isSameOrigin && isWriteRequest && !headers['X-Requested-With']) {
+                headers['X-Requested-With'] = 'XMLHttpRequest';
+            }
+
             const response = await fetch(url, {
                 ...options,
-                headers: {
-                    Accept: 'application/json',
-                    ...(options.headers || {}),
-                },
+                credentials: options.credentials || 'same-origin',
+                headers,
             });
 
             const text = await response.text();
@@ -361,7 +376,6 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'X-Frappe-CSRF-Token': frappe.csrf_token,
                 },
                 body: JSON.stringify({
                     client_name: 'Frappe AI Assistant',
