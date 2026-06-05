@@ -617,6 +617,12 @@
 .bubble p:last-child { margin-bottom: 0; }
 .bubble strong { font-weight: 700; }
 .bubble em { font-style: italic; }
+.bubble a {
+    color: #a78bfa;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+.message.user .bubble a { color: #f5f3ff; }
 .bubble code {
     background: rgba(139,92,246,0.15);
     color: #c4b5fd;
@@ -673,6 +679,41 @@
 }
 .bubble ul, .bubble ol { padding-left: 20px; margin: 6px 0; }
 .bubble li { margin-bottom: 3px; }
+.bubble .md-table-wrap {
+    margin: 8px 0;
+    overflow-x: auto;
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: var(--border-radius-sm);
+}
+.bubble table {
+    width: 100%;
+    min-width: 520px;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+.bubble th,
+.bubble td {
+    padding: 9px 12px;
+    text-align: left;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+    vertical-align: top;
+}
+.bubble thead th {
+    background: rgba(255,255,255,0.05);
+    font-weight: 700;
+}
+.bubble tbody tr:last-child td { border-bottom: none; }
+
+.ai-chat-wrapper.light-mode .bubble .md-table-wrap {
+    border-color: rgba(0,0,0,0.08);
+}
+.ai-chat-wrapper.light-mode .bubble th,
+.ai-chat-wrapper.light-mode .bubble td {
+    border-bottom-color: rgba(0,0,0,0.08);
+}
+.ai-chat-wrapper.light-mode .bubble thead th {
+    background: rgba(0,0,0,0.04);
+}
 
 /* ============================================================
    ERROR STATE INSIDE BUBBLE
