@@ -19,6 +19,38 @@
  */
 
 frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
+    async function ensureMarkdownRuntime() {
+        const assets = [
+            '/assets/ai_assistant/js/vendor/marked.umd.js',
+            '/assets/ai_assistant/js/vendor/purify.min.js',
+        ];
+
+        await Promise.all(assets.map(src => new Promise((resolve, reject) => {
+            if (document.querySelector(`script[data-ai-markdown-src="${src}"]`)) {
+                resolve();
+                return;
+            }
+
+            const script = document.createElement('script');
+            script.src = src;
+            script.async = false;
+            script.dataset.aiMarkdownSrc = src;
+            script.onload = () => resolve();
+            script.onerror = () => reject(new Error(`Failed to load ${src}`));
+            document.head.appendChild(script);
+        })));
+
+        if (!window.marked || !window.DOMPurify) {
+            throw new Error('Markdown libraries are unavailable');
+        }
+    }
+
+    try {
+        await ensureMarkdownRuntime();
+    } catch (error) {
+        console.error('AI Chat: markdown runtime failed to load', error);
+        frappe.show_alert({ message: 'Markdown renderer failed to load', indicator: 'red' }, 5);
+    }
 
     const page = frappe.ui.make_app_page({
         parent: wrapper,
@@ -849,120 +881,85 @@ frappe.pages['ai-chat'].on_page_load = async function (wrapper) {
     // =========================================================================
     const ChatUI = (() => {
         const MAX_TITLE_DISPLAY = 30;
+        let markedInstance = null;
 
         // ------ Markdown renderer ------
         function renderMarkdown(text) {
             if (!text) return '';
 
             function escHtml(str) {
-                return str
+                return String(str)
                     .replace(/&/g, '&amp;')
                     .replace(/</g, '&lt;')
                     .replace(/>/g, '&gt;');
             }
 
-            const codeBlocks = [];
+            function escAttr(str) {
+                return escHtml(str)
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#39;');
+            }
 
-            // 1. Extract fenced code blocks and replace with HTML immediately
-            let result = text.replace(/```(\w*)\s*\n?([\s\S]*?)```/g, (_, lang, code) => {
-                const escaped   = escHtml(code.trimEnd());
-                const langLabel = lang || 'code';
-                const html = `
+            function getMarkedInstance() {
+                if (markedInstance) return markedInstance;
+                if (!window.marked) return null;
+
+                const renderer = new window.marked.Renderer();
+                const baseTableRenderer = renderer.table.bind(renderer);
+
+                renderer.code = ({ text: codeText = '', lang = '' }) => {
+                    const normalizedCode = String(codeText).replace(/\n$/, '');
+                    const escapedCode = escHtml(normalizedCode);
+                    const langLabel = (lang || 'code').trim() || 'code';
+
+                    return `
                     <div class="code-block-wrap">
                         <div class="code-block-header">
                             <span class="code-lang">${escHtml(langLabel)}</span>
-                            <button class="copy-code-btn" data-code="${escaped.replace(/"/g, '&quot;')}">
+                            <button class="copy-code-btn" data-code="${escAttr(normalizedCode)}">
                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                     <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
                                     <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
                                 </svg> Copy
                             </button>
                         </div>
-                        <pre>${escaped}</pre>
+                        <pre>${escapedCode}</pre>
                     </div>`;
-                return html;
-            });
+                };
 
-            // 2. Inline code
-            result = result.replace(/`([^`]+)`/g, (_, c) => `<code>${escHtml(c)}</code>`);
+                renderer.table = function (token) {
+                    return `<div class="md-table-wrap">${baseTableRenderer(token)}</div>`;
+                };
 
-            // 3. Bold / italic
-            result = result.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-            result = result.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<em>$1</em>');
-            result = result.replace(/_(.+?)_/g, '<em>$1</em>');
+                markedInstance = new window.marked.Marked({
+                    gfm: true,
+                    breaks: true,
+                    renderer,
+                });
 
-            // 4. Headings and lists and paragraphs
-            const lines  = result.split('\n');
-            const output = [];
-            let inOl = false, inUl = false;
-
-            for (const line of lines) {
-                // Handle headings
-                const h1Match = line.match(/^#\s+(.+)/);
-                if (h1Match) {
-                    if (inOl) { output.push('</ol>'); inOl = false; }
-                    if (inUl) { output.push('</ul>'); inUl = false; }
-                    output.push(`<h1>${h1Match[1]}</h1>`);
-                    continue;
-                }
-
-                const h2Match = line.match(/^##\s+(.+)/);
-                if (h2Match) {
-                    if (inOl) { output.push('</ol>'); inOl = false; }
-                    if (inUl) { output.push('</ul>'); inUl = false; }
-                    output.push(`<h2>${h2Match[1]}</h2>`);
-                    continue;
-                }
-
-                const h3Match = line.match(/^###\s+(.+)/);
-                if (h3Match) {
-                    if (inOl) { output.push('</ol>'); inOl = false; }
-                    if (inUl) { output.push('</ul>'); inUl = false; }
-                    output.push(`<h3>${h3Match[1]}</h3>`);
-                    continue;
-                }
-
-                const h4Match = line.match(/^####\s+(.+)/);
-                if (h4Match) {
-                    if (inOl) { output.push('</ol>'); inOl = false; }
-                    if (inUl) { output.push('</ul>'); inUl = false; }
-                    output.push(`<h4>${h4Match[1]}</h4>`);
-                    continue;
-                }
-
-                // Handle ordered lists
-                const olMatch = line.match(/^(\d+)\.\s+(.+)/);
-                if (olMatch) {
-                    if (!inOl) { output.push('<ol>'); inOl = true; }
-                    output.push(`<li>${olMatch[2]}</li>`);
-                    continue;
-                } else if (inOl) { output.push('</ol>'); inOl = false; }
-
-                // Handle unordered lists
-                const ulMatch = line.match(/^[-*]\s+(.+)/);
-                if (ulMatch) {
-                    if (!inUl) { output.push('<ul>'); inUl = true; }
-                    output.push(`<li>${ulMatch[1]}</li>`);
-                    continue;
-                } else if (inUl) { output.push('</ul>'); inUl = false; }
-
-                if (line.trim() === '') { output.push(''); continue; }
-
-                // Do NOT wrap a line that is already an HTML block (code block)
-                // Since code blocks are already inserted as raw HTML, they won't be caught here.
-                output.push(`<p>${line}</p>`);
+                return markedInstance;
             }
 
-            if (inOl) output.push('</ol>');
-            if (inUl) output.push('</ul>');
+            const parser = getMarkedInstance();
+            if (!parser || !window.DOMPurify) {
+                return escHtml(text).replace(/\n/g, '<br>');
+            }
 
-            result = output.join('');
+            const normalized = String(text).replace(/^[\u200B\u200C\u200D\u200E\u200F\uFEFF]/, '');
+            const parsed = parser.parse(normalized);
+            const sanitized = window.DOMPurify.sanitize(parsed, {
+                USE_PROFILES: { html: true },
+            });
 
-            // 5. Clean up empty <p> tags (optional)
-            result = result.replace(/<p>\s*<\/p>/g, '');
+            const doc = document.createElement('div');
+            doc.innerHTML = sanitized;
+            doc.querySelectorAll('a[href]').forEach((link) => {
+                link.setAttribute('target', '_blank');
+                link.setAttribute('rel', 'noopener noreferrer');
+            });
 
-            return result;
-}
+            return doc.innerHTML;
+        }
     
         // ------ Sidebar ------
         function renderConversationList(conversations, currentId, callbacks) {
